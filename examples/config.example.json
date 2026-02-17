@@ -1,0 +1,18 @@
+{
+    "output_base": "/home/<your-username>/onep-backups",
+    "formats": [
+        "json",
+        "md"
+    ],
+    "encrypt": "age",
+    "download_attachments": true,
+    "age": {
+        "pass_source": "keychain",
+        "pass_item": "Backup Passphrase",
+        "pass_field": "password",
+        "recipients": "",
+        "use_yubikey": false,
+        "keychain_service": "onep-exporter",
+        "keychain_username": "backup"
+    }
+}

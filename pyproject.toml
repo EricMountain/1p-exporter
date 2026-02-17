@@ -1,0 +1,11 @@
+[project]
+name = "1p-exporter"
+version = "0.1.0"
+description = "Export 1Password vaults to JSON/Markdown and create local backups"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "eric" }]
+
+[project.scripts]
+onep-exporter = "onep_exporter.__main__:main"
