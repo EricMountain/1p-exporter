@@ -1,8 +1,10 @@
-# onep-exporter — 1Password vault exporter and secure local backup
+# 1p-exporter — 1Password vault exporter and secure local backup
 
 ## Overview
 
-onep-exporter exports all your 1Password vaults/items to local files, packages them into a timestamped archive, and optionally encrypts that archive client‑side. It produces machine‑readable JSON and human‑readable Markdown, stores a `manifest.json` with checksums, and provides helpers for safe passphrase storage.
+1p-exporter exports all your 1Password vaults/items to local files, packages them into a timestamped archive, and optionally encrypts that archive client‑side. It produces machine‑readable JSON and human‑readable Markdown, stores a `manifest.json` with checksums, and provides helpers for safe passphrase storage.
+
+Note: the Python import package name remains `onep_exporter` (use `import onep_exporter`); the user-facing project/CLI name is `1p-exporter`.
 
 ## Features
 
@@ -10,7 +12,7 @@ onep-exporter exports all your 1Password vaults/items to local files, packages t
 - Per‑vault `JSON` and `Markdown` exports
 - Attachment download (best‑effort) and `manifest.json` with SHA256 checksums
 - Optional client‑side encryption with `age` (recommended) or symmetric `gpg`
-- Interactive `init` flow and persistent configuration (`~/.config/onep-exporter/config.json`)
+- Interactive `init` flow and persistent configuration (`~/.config/1p-exporter/config.json`)
 - Helpers to store/retrieve passphrases in 1Password or macOS Keychain (Touch ID supported)
 
 ## Prerequisites
@@ -32,24 +34,24 @@ Sign in (interactive):
 ```bash
 op signin <your-domain>
 # or
-onep-exporter init --signin
+1p-exporter init --signin
 ```
 
 Run a backup (unencrypted):
 
 ```bash
-onep-exporter backup --output ~/onep-backups
+1p-exporter backup --output ~/onep-backups
 ```
 
 Verify the backup:
 
 ```bash
-onep-exporter verify ~/onep-backups/<timestamp>/manifest.json
+1p-exporter verify ~/onep-backups/<timestamp>/manifest.json
 ```
 
 ## Interactive setup & helpers
 
-- `onep-exporter init` — interactive configuration; can generate/store an `age` passphrase in 1Password or Keychain and persists defaults.
+- `1p-exporter init` — interactive configuration; can generate/store an `age` passphrase in 1Password or Keychain and persists defaults.
 - Programmatic helpers: `configure_interactive()`, `init_setup()`, `OpExporter.signin_interactive()`
 
 ## Encryption
@@ -63,15 +65,15 @@ Examples:
 
 ```bash
 # age passphrase from a 1Password item
-onep-exporter backup --encrypt age --age-pass-source 1password --age-pass-item "Backup Passphrase"
+1p-exporter backup --encrypt age --age-pass-source 1password --age-pass-item "Backup Passphrase"
 
 # age passphrase from macOS Keychain (Touch ID may prompt)
-onep-exporter backup --encrypt age --age-pass-source keychain
+1p-exporter backup --encrypt age --age-pass-source keychain
 ```
 
 ## Configuration
 
-- Default config file: `~/.config/onep-exporter/config.json`
+- Default config file: `~/.config/1p-exporter/config.json`
 - Override with: `ONEP_EXPORTER_CONFIG=/path/to/config.json`
 - CLI flags override saved config values.
 
@@ -87,15 +89,26 @@ See `examples/config.example.json` for a ready-to-copy sample configuration.
 
 ## Commands (summary)
 
-- `onep-exporter init` — interactive setup and optional passphrase storage
-- `onep-exporter backup [--encrypt age|gpg|none]` — run export (CLI overrides config)
-- `onep-exporter verify <manifest.json>` — verify manifest integrity
+- `1p-exporter init` — interactive setup and optional passphrase storage
+- `1p-exporter backup [--encrypt age|gpg|none]` — run export (CLI overrides config)
+- `1p-exporter verify <manifest.json>` — verify manifest integrity
 
 ## Development & tests
 
 ```bash
 python -m pytest
 ```
+
+### Development environment (direnv)
+
+- A `.envrc` is provided in the project root to automatically add `src/` to `PYTHONPATH` and expose the project's `.venv/bin` on `PATH`.
+- After installing `direnv` and adding its shell hook to your shell, run:
+
+```bash
+direnv allow
+```
+
+You can still run the package without direnv using `PYTHONPATH=src .venv/bin/python -m onep_exporter ...`.
 
 ## References
 

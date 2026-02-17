@@ -119,7 +119,7 @@ class OpExporter:
         return token
 
 
-def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, age_keychain_service: str = "onep-exporter", age_keychain_username: str = "backup") -> Path:
+def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     outdir = output_base / ts
@@ -336,7 +336,7 @@ def _store_passphrase_in_keychain(service: str, username: str, passphrase: str) 
             service, "-a", username, "-w", passphrase, "-U"])
 
 
-def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, store_in_1password: Optional[str] = None, onepassword_vault: Optional[str] = None, store_in_keychain: bool = False, keychain_service: str = "onep-exporter", keychain_username: str = "backup", onepassword_field: str = "password") -> str:
+def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, store_in_1password: Optional[str] = None, onepassword_vault: Optional[str] = None, store_in_keychain: bool = False, keychain_service: str = "1p-exporter", keychain_username: str = "backup", onepassword_field: str = "password") -> str:
     """Create or store an age passphrase according to provided options.
 
     Returns the plaintext passphrase (also stores it as requested).
@@ -379,17 +379,15 @@ def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, stor
 
 # Configuration persistence -------------------------------------------------
 def _config_file_path() -> Path:
-    """Return path to config file (respect ONEP_EXPORTER_CONFIG or XDG_CONFIG_HOME)."""
+    """Return path to config file (respect ONEP_EXPORTER_CONFIG or XDG_CONFIG_HOME).
+    Uses `~/.config/1p-exporter/config.json` by default; legacy `onep-exporter` path is still supported when loading."""
     import os
     cfg = os.environ.get("ONEP_EXPORTER_CONFIG")
     if cfg:
         return Path(cfg)
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        base = Path(xdg)
-    else:
-        base = Path.home() / ".config"
-    return base / "onep-exporter" / "config.json"
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "1p-exporter" / "config.json"
 
 
 def save_config(data: dict) -> Path:
@@ -407,13 +405,21 @@ def save_config(data: dict) -> Path:
 
 def load_config() -> dict:
     p = _config_file_path()
-    if not p.exists():
-        return {}
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    if p.exists():
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    # fallback to legacy config path (`onep-exporter`) for backward compatibility
+    legacy = p.parent.parent / "onep-exporter" / p.name
+    if legacy.exists():
+        try:
+            with legacy.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
 
 def configure_interactive() -> dict:
@@ -430,7 +436,7 @@ def configure_interactive() -> dict:
     import getpass
     import os
 
-    print("Interactive setup — configure defaults for onep-exporter backups")
+    print("Interactive setup — configure defaults for 1p-exporter backups")
     cfg = load_config()
 
     def prompt(prompt_text: str, default: Optional[str] = None) -> str:
@@ -452,7 +458,7 @@ def configure_interactive() -> dict:
     age_pass_source = None
     age_pass_item = None
     age_pass_field = age_cfg.get("pass_field", "password")
-    age_keychain_service = age_cfg.get("keychain_service", "onep-exporter")
+    age_keychain_service = age_cfg.get("keychain_service", "1p-exporter")
     age_keychain_username = age_cfg.get("keychain_username", "backup")
     age_recipients = age_cfg.get("recipients", "")
     age_use_yubikey = age_cfg.get("use_yubikey", False)

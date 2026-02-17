@@ -8,4 +8,4 @@ license = { text = "MIT" }
 authors = [{ name = "eric" }]
 
 [project.scripts]
-onep-exporter = "onep_exporter.__main__:main"
+"1p-exporter" = "onep_exporter.__main__:main"

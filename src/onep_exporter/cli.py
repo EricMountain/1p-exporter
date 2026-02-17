@@ -5,7 +5,7 @@ from .exporter import run_backup, verify_manifest, load_config, configure_intera
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="onep-exporter", description="Export 1Password vaults and create backups")
+        prog="1p-exporter", description="Export 1Password vaults and create backups")
     sub = p.add_subparsers(dest="cmd")
 
     b = sub.add_parser(
@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="store generated/provided passphrase in 1Password (item title)")
     i.add_argument("--store-in-keychain", action="store_true",
                    help="store generated/provided passphrase in macOS Keychain")
-    i.add_argument("--keychain-service", default="onep-exporter",
+    i.add_argument("--keychain-service", default="1p-exporter",
                    help="keychain service name to store under")
     i.add_argument("--keychain-username", default="backup",
                    help="keychain account/username")
@@ -102,7 +102,7 @@ def main(argv=None):
         age_use_yubikey = args.age_use_yubikey if hasattr(
             args, "age_use_yubikey") else age_cfg.get("use_yubikey", False)
         age_keychain_service = args.age_keychain_service if hasattr(
-            args, "age_keychain_service") else age_cfg.get("keychain_service", "onep-exporter")
+            args, "age_keychain_service") else age_cfg.get("keychain_service", "1p-exporter")
         age_keychain_username = args.age_keychain_username if hasattr(
             args, "age_keychain_username") else age_cfg.get("keychain_username", "backup")
 

@@ -12,7 +12,7 @@
         "pass_field": "password",
         "recipients": "",
         "use_yubikey": false,
-        "keychain_service": "onep-exporter",
+        "keychain_service": "1p-exporter",
         "keychain_username": "backup"
     }
 }
