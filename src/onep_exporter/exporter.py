@@ -119,7 +119,7 @@ class OpExporter:
         return token
 
 
-def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
+def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     outdir = output_base / ts
@@ -233,8 +233,69 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
         import os
         import getpass
 
-        # determine passphrase source
+        # gather stored passphrases (for consistency checks / optional sync)
         passphrase = None
+        stored_values = {}
+
+        # 1Password (only if an item reference is available)
+        if age_pass_item:
+            try:
+                v = exporter.get_item_field_value(
+                    age_pass_item, age_pass_field)
+            except Exception:
+                v = None
+            if v:
+                stored_values["1password"] = v
+
+        # keychain (platform/keyring may raise)
+        try:
+            kc = _get_passphrase_from_keychain(
+                age_keychain_service, age_keychain_username)
+        except Exception:
+            kc = None
+        if kc:
+            stored_values["keychain"] = kc
+
+        # environment variable
+        env_val = os.environ.get("BACKUP_PASSPHRASE")
+        if env_val:
+            stored_values["env"] = env_val
+
+        # If requested, sync authoritative value from 1Password into other stores.
+        if sync_passphrase_from_1password:
+            # ensure we can read 1Password value first
+            auth = stored_values.get("1password")
+            if not auth:
+                if age_pass_item:
+                    auth = exporter.get_item_field_value(
+                        age_pass_item, age_pass_field)
+                if not auth:
+                    raise RuntimeError(
+                        "--sync-passphrase-from-1password set but could not read passphrase from 1Password")
+
+            # sync to keychain if missing or different
+            try:
+                if stored_values.get("keychain") != auth:
+                    _store_passphrase_in_keychain(
+                        age_keychain_service, age_keychain_username, auth)
+                    stored_values["keychain"] = auth
+            except Exception as e:
+                raise RuntimeError(
+                    f"failed to store passphrase in keychain during sync: {e}")
+
+            # populate environment for this run (cannot persist across sessions)
+            if stored_values.get("env") != auth:
+                os.environ["BACKUP_PASSPHRASE"] = auth
+                stored_values["env"] = auth
+
+        # If the passphrase exists in more than one place, ensure they match
+        if len(stored_values) > 1:
+            unique_vals = set(stored_values.values())
+            if len(unique_vals) > 1:
+                raise RuntimeError(
+                    f"passphrase mismatch between configured stores: {', '.join(sorted(stored_values.keys()))}")
+
+        # determine passphrase source (respect user's configured source / CLI choice)
         if age_pass_source == "env":
             passphrase = os.environ.get("BACKUP_PASSPHRASE")
         elif age_pass_source == "prompt":

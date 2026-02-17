@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma-separated age public recipients (optional)")
     b.add_argument("--age-use-yubikey", action="store_true", default=argparse.SUPPRESS,
                    help="(optional) include a YubiKey-backed recipient (requires user to have configured a yubikey age identity)")
+    b.add_argument("--sync-passphrase-from-1password", action="store_true", default=argparse.SUPPRESS,
+                   help="treat the passphrase stored in 1Password as authoritative and copy it to other configured stores (keychain/ENV) before encrypting")
     b.add_argument("--no-attachments", action="store_true", default=argparse.SUPPRESS,
                    help="do not attempt to download attachments (overrides saved config)")
     b.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS,
@@ -101,6 +103,8 @@ def main(argv=None):
             args, "age_recipients") else age_cfg.get("recipients", "")
         age_use_yubikey = args.age_use_yubikey if hasattr(
             args, "age_use_yubikey") else age_cfg.get("use_yubikey", False)
+        sync_passphrase_from_1password = args.sync_passphrase_from_1password if hasattr(
+            args, "sync_passphrase_from_1password") else False
         age_keychain_service = args.age_keychain_service if hasattr(
             args, "age_keychain_service") else age_cfg.get("keychain_service", "1p-exporter")
         age_keychain_username = args.age_keychain_username if hasattr(
@@ -117,6 +121,7 @@ def main(argv=None):
             age_pass_field=age_pass_field,
             age_recipients=age_recipients,
             age_use_yubikey=age_use_yubikey,
+            sync_passphrase_from_1password=sync_passphrase_from_1password,
             age_keychain_service=age_keychain_service,
             age_keychain_username=age_keychain_username,
         )

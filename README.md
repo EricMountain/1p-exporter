@@ -59,6 +59,8 @@ Verify the backup:
 - `gpg` (symmetric): passphrase via `BACKUP_PASSPHRASE` env or prompt.
 - `age` (recommended): supports passphrase recipients and public‑key recipients.
   - `--age-pass-source` may be `env`, `prompt`, `1password`, or `keychain`.
+  - If the passphrase is present in multiple stores (1Password, Keychain, or the `BACKUP_PASSPHRASE` env), 1p-exporter will verify they are identical and will abort if they differ.
+  - Use `--sync-passphrase-from-1password` to treat the value in 1Password as authoritative and copy it to other configured stores (keychain/ENV) before encrypting.
   - Use `--age-recipients` to include public recipients (e.g. YubiKey‑backed identities).
 
 Examples:

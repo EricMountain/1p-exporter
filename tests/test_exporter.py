@@ -110,3 +110,62 @@ def test_store_passphrase_skips_if_exists(monkeypatch):
         "Title", "password", "pw", vault="myvault")
     assert res.get("id") == "exists"
     assert called["create"] is False
+
+
+def test_passphrase_mismatch_raises(monkeypatch, tmp_path):
+    # ensure tools exist
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
+    # 1Password has one value, keychain has a different value
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "get_item_field_value", lambda self, item, field: "onepw")
+    monkeypatch.setattr(
+        exporter_module, "_get_passphrase_from_keychain", lambda s, u: "kc-different")
+
+    # fake op vault list
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None: (
+        0, "[]", "") if cmd[:3] == ["op", "vault", "list"] else (0, "", ""))
+
+    try:
+        exporter_module.run_backup(output_base=str(tmp_path), encrypt="age", age_pass_source="1password", age_pass_item="Item",
+                                   age_pass_field="password", age_keychain_service="svc", age_keychain_username="acct", quiet=True)
+    except RuntimeError as e:
+        assert "passphrase mismatch" in str(e)
+    else:
+        raise AssertionError(
+            "expected RuntimeError due to passphrase mismatch")
+
+
+def test_sync_passphrase_from_1password_to_keychain(monkeypatch, tmp_path):
+    # ensure tools exist and age will run
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
+    # 1Password has the authoritative value; keychain empty
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "get_item_field_value", lambda self, item, field: "sync-me")
+    monkeypatch.setattr(
+        exporter_module, "_get_passphrase_from_keychain", lambda s, u: None)
+
+    stored = {"kc": False}
+
+    def fake_store_kc(srv, user, pw):
+        stored["kc"] = (srv, user, pw)
+
+    monkeypatch.setattr(
+        exporter_module, "_store_passphrase_in_keychain", fake_store_kc)
+
+    # fake run_cmd to allow vault listing and to accept age invocation
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "vault", "list"]:
+            return 0, "[]", ""
+        if cmd[0] == "age":
+            return 0, "", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="age", age_pass_source="1password", age_pass_item="Item",
+                                     sync_passphrase_from_1password=True, age_keychain_service="svc", age_keychain_username="acct", quiet=True)
+
+    assert stored["kc"] == ("svc", "acct", "sync-me")
+    assert out.suffix == ".age"
