@@ -112,6 +112,71 @@ def test_store_passphrase_skips_if_exists(monkeypatch):
     assert called["create"] is False
 
 
+def test_store_passphrase_pipes_json_via_stdin(monkeypatch):
+    """Verify that `op item create` receives the JSON template on stdin (via `-`)
+    and uses category 'Secure Note' with field type CONCEALED."""
+    seen = {}
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        seen["cmd"] = cmd
+        seen["input"] = input
+        return 0, '{"id": "new"}', ""
+
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "find_item_by_title", lambda self, t, vault=None: None)
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    op = exporter_module.OpExporter()
+    res = op.store_passphrase_in_1password(
+        "Title", "password", "s3cret", vault="myvault")
+    assert res.get("id") == "new"
+
+    cmd = seen["cmd"]
+    # `-` must be the last positional arg so op reads template from stdin
+    assert cmd[-1] == "-"
+    assert "--format" in cmd
+    assert "--vault" in cmd
+
+    # the JSON template is sent as bytes on stdin
+    payload = json.loads(seen["input"])
+    assert payload["title"] == "Title"
+    # category is passed via --category flag, not in the JSON template
+    assert "category" not in payload
+    assert "--category" in cmd
+    cat_idx = cmd.index("--category")
+    assert cmd[cat_idx + 1] == "Secure Note"
+    assert len(payload["fields"]) == 1
+    field = payload["fields"][0]
+    assert field["type"] == "CONCEALED"
+    assert field["value"] == "s3cret"
+    assert field["label"] == "password"
+
+
+def test_store_private_key_uses_concealed_field(monkeypatch):
+    """Private keys are also stored as CONCEALED fields (same as passphrases)."""
+    seen = {}
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        seen["input"] = input
+        return 0, '{"id": "new"}', ""
+
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "find_item_by_title", lambda self, t, vault=None: None)
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    op = exporter_module.OpExporter()
+    private = "AGE-SECRET-KEY-1ABCDEFGHIJKLMNOP"
+    res = op.store_passphrase_in_1password(
+        "Title", "private_key", private, vault="myvault")
+    assert res.get("id") == "new"
+
+    payload = json.loads(seen["input"])
+    field = payload["fields"][0]
+    assert field["type"] == "CONCEALED"
+    assert field["id"] == "private_key"
+    assert field["value"] == private
+
+
 def test_passphrase_mismatch_raises(monkeypatch, tmp_path):
     # ensure tools exist
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
@@ -169,3 +234,107 @@ def test_sync_passphrase_from_1password_to_keychain(monkeypatch, tmp_path):
 
     assert stored["kc"] == ("svc", "acct", "sync-me")
     assert out.suffix == ".age"
+
+
+def test_doctor_detects_missing_op(monkeypatch, capsys):
+    # op missing -> critical failure
+    monkeypatch.setattr(exporter_module, "ensure_tool",
+                        lambda name: False if name == "op" else True)
+    monkeypatch.setattr(exporter_module, "load_config", lambda: {})
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+    assert ok is False
+    assert "op" in captured.out
+    assert "❌" in captured.out
+    assert "FAILED" in captured.out
+
+
+def test_doctor_detects_missing_age_tool_from_config(monkeypatch, capsys):
+    # config requests age but `age` binary unavailable
+    monkeypatch.setattr(exporter_module, "ensure_tool",
+                        lambda name: False if name == "age" else True)
+    monkeypatch.setattr(exporter_module, "load_config",
+                        lambda: {"encrypt": "age", "age": {}})
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+    assert ok is False
+    assert "age" in captured.out
+    assert "❌" in captured.out
+    assert "FAILED" in captured.out
+
+
+def test_doctor_ok_with_valid_config_and_tools(monkeypatch, capsys):
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    monkeypatch.setenv("BACKUP_PASSPHRASE", "pw123")
+    monkeypatch.setattr(exporter_module, "load_config", lambda: {
+                        "encrypt": "age", "formats": ["json"], "age": {"pass_source": "env"}})
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+    assert ok is True
+    assert "✅" in captured.out
+    assert "OK" in captured.out
+    assert "BACKUP_PASSPHRASE" in captured.out
+
+
+def test_doctor_tools_section_reports_presence_and_absence(monkeypatch, capsys):
+    # simulate some tools present, others absent
+    def fake_ensure(name):
+        # report core tools + requested ones as present; leave others missing
+        return name in ("op", "age", "gpg", "apt")
+
+    monkeypatch.setattr(exporter_module, "ensure_tool", fake_ensure)
+    monkeypatch.setattr(exporter_module, "load_config", lambda: {})
+
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+
+    # overall still OK (missing tools are informational unless required by config)
+    assert ok is True
+
+    # present tools reported as available
+    assert "`age` available" in captured.out
+    assert "`gpg` available" in captured.out
+
+    # missing tools reported as not found (warnings)
+    assert "`age-keygen` not found" in captured.out
+    # `security` is macOS-only so should NOT be listed on non-darwin platforms
+    assert "`security`" not in captured.out
+
+    # suggestions should include apt-based install for missing age-keygen
+    assert "sudo apt install -y age" in captured.out or "install age" in captured.out
+
+
+def test_doctor_tools_mark_config_required_tool_missing(monkeypatch, capsys):
+    # config requires age but age tool missing -> failure
+    def fake_ensure(n):
+        # pretend apt is available for suggestion, but `age` itself is missing
+        return n == "apt" or n == "op"
+
+    monkeypatch.setattr(exporter_module, "ensure_tool", fake_ensure)
+    monkeypatch.setattr(exporter_module, "load_config",
+                        lambda: {"encrypt": "age", "age": {}})
+
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+    assert ok is False
+    assert "`age` not found" in captured.out or "age" in captured.out
+    assert "sudo apt install -y age" in captured.out
+    assert "❌" in captured.out
+    assert "FAILED" in captured.out
+
+
+def test_doctor_includes_security_for_darwin(monkeypatch, capsys):
+    # on darwin `security` should be checked/reported
+    import sys as _sys
+    monkeypatch.setattr(_sys, "platform", "darwin")
+
+    def fake_ensure(name):
+        return name in ("op", "age")
+    monkeypatch.setattr(exporter_module, "ensure_tool", fake_ensure)
+    monkeypatch.setattr(exporter_module, "load_config", lambda: {})
+
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+
+    # `security` should appear in the tools section on darwin
+    assert "`security` not found" in captured.out or "security" in captured.out

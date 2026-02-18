@@ -78,30 +78,50 @@ class OpExporter:
             return None
 
     def store_passphrase_in_1password(self, title: str, field_name: str, passphrase: str, vault: Optional[str] = None) -> dict:
-        """Create a password item in 1Password **only if it does not already exist**.
+        """Create a Secure Note item in 1Password **only if it does not already exist**.
+
+        The secret is stored as a CONCEALED custom field so it stays hidden in the
+        1Password UI.  The JSON template is piped via stdin (``-`` positional arg)
+        because ``op item create`` interprets bare positional args as assignment
+        statements, not JSON.
 
         Returns the existing item JSON if present, or the created item JSON.
+
+        See https://developer.1password.com/docs/cli/item-create/#with-an-item-json-template
         """
         existing = self.find_item_by_title(title, vault=vault)
         if existing:
             # do not overwrite existing item
             return existing
 
-        # safer payload: explicit field name + type
+        # Build a JSON template.
+        # • We omit "category" from the JSON and pass it via --category flag
+        #   instead, because `op` expects an enum identifier (e.g. SECURE_NOTE)
+        #   in JSON but the display name ("Secure Note") via the flag.
+        # • category "Secure Note" — avoids built-in required fields that other
+        #   categories (e.g. Password) enforce, which causes "cannot add a field
+        #   with no value" errors.
+        # • field type CONCEALED — keeps the value hidden in 1Password.
         payload = {
             "title": title,
-            "category": "password",
             "fields": [
-                {"label": field_name, "name": field_name,
-                    "type": "password", "value": passphrase}
-            ]
+                {
+                    "id": field_name,
+                    "label": field_name,
+                    "type": "CONCEALED",
+                    "value": passphrase,
+                }
+            ],
         }
-        cmd = ["op", "item", "create"]
+
+        cmd = ["op", "item", "create", "--category", "Secure Note",
+               "--format", "json"]
         if vault:
             cmd.extend(["--vault", vault])
-        cmd.append(json.dumps(payload))
-        cmd.extend(["--format", "json"])
-        _, out, _ = run_cmd(cmd)
+        # `-` tells op to read the item template from stdin
+        cmd.append("-")
+
+        _, out, _ = run_cmd(cmd, input=json.dumps(payload).encode())
         return json.loads(out)
 
     def signin_interactive(self, account: Optional[str] = None) -> str:
@@ -525,17 +545,119 @@ def configure_interactive() -> dict:
     age_use_yubikey = age_cfg.get("use_yubikey", False)
 
     if encrypt == "age":
+        import sys
+        is_macos = sys.platform == "darwin"
+
+        # only mention keychain option when running on macOS
+        pass_source_choices = "env/prompt/1password/keychain" if is_macos else "env/prompt/1password"
+        default_pass_source = age_cfg.get(
+            "pass_source", "keychain" if is_macos else "prompt")
         age_pass_source = prompt(
-            "age passphrase source (env/prompt/1password/keychain)", age_cfg.get("pass_source", "keychain"))
+            f"age passphrase source ({pass_source_choices})", default_pass_source)
         if age_pass_source == "1password":
             age_pass_item = prompt("1Password item title for passphrase (item title)", age_cfg.get(
                 "pass_item", "My Backup Passphrase"))
             age_pass_field = prompt("1Password field name", age_pass_field)
-        if age_pass_source == "keychain":
+        if is_macos and age_pass_source == "keychain":
             age_keychain_service = prompt(
                 "Keychain service name", age_keychain_service)
             age_keychain_username = prompt(
                 "Keychain account name", age_keychain_username)
+
+        # offer to generate an age keypair and add its public recipient
+        gen_age = prompt("Generate a new age keypair? (y/n)", "n")
+        if gen_age.lower().startswith("y"):
+            if not ensure_tool("age-keygen"):
+                print(
+                    "warning: 'age-keygen' not available; cannot generate age recipient")
+            else:
+                try:
+                    _, out, _ = run_cmd(["age-keygen"])
+                except Exception as e:
+                    print(f"warning: failed to generate age keypair: {e}")
+                else:
+                    # extract private key (support multiple age-keygen output formats) and public recipient
+                    import re
+                    private_key = None
+                    pub = None
+
+                    # 1) full PEM-like AGE private key / key-file block (several variants used in the wild)
+                    m_block = re.search(
+                        r"(-----BEGIN AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----.*?-----END AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----)", out, re.S)
+                    if m_block:
+                        private_key = m_block.group(1).strip()
+
+                    # 2) secret-token style (AGE-SECRET-KEY-1...)
+                    if not private_key:
+                        m_secret = re.search(
+                            r"(AGE-SECRET-KEY-[0-9A-Za-z\-_=]+)", out)
+                        if m_secret:
+                            private_key = m_secret.group(1).strip()
+
+                    # 3) comment/key-file lines like "# secret key: ..."
+                    if not private_key:
+                        m_line = re.search(
+                            r"(?m)^\s*#?\s*(?:secret|secret key):\s*(\S+)", out)
+                        if m_line:
+                            private_key = m_line.group(1).strip()
+
+                    # public recipient: accept commented or plain "public key: age1..." or any age1 token
+                    m_pub = re.search(
+                        r"(?m)^\s*#?\s*public key:\s*(age1[0-9a-z]+)", out)
+                    if m_pub:
+                        pub = m_pub.group(1)
+                    else:
+                        m_any = re.search(r"(age1[0-9a-z]+)", out)
+                        if m_any:
+                            pub = m_any.group(1)
+
+                    if not private_key or not pub:
+                        print("warning: could not parse generated age keypair output")
+                    else:
+                        print(f"Generated age recipient: {pub}")
+                        if age_recipients:
+                            age_recipients = age_recipients + "," + pub
+                        else:
+                            age_recipients = pub
+
+                        # offer to store private key in 1Password
+                        store1p = prompt(
+                            "Store private key in 1Password? (y/n)", "n")
+                        if store1p.lower().startswith("y"):
+                            # default includes current OS username to make items discoverable
+                            default_title = f"1Password backup - {getpass.getuser()} - Age private key"
+                            title = prompt(
+                                "1Password item title for private key", default_title)
+                            field = prompt(
+                                "1Password field name", "private_key")
+                            vault = prompt(
+                                "1Password vault to store the private key in (optional)", None)
+                            try:
+                                OpExporter().store_passphrase_in_1password(
+                                    title, field, private_key, vault=vault)
+                            except Exception as e:
+                                # print sanitized error (CommandError now redacts secrets)
+                                print(
+                                    f"warning: failed to store private key in 1Password: {e}")
+
+                        # offer to store private key in macOS Keychain (only on macOS)
+                        import sys
+                        if sys.platform == "darwin":
+                            store_kc = prompt(
+                                "Store private key in macOS Keychain? (y/n)", "n")
+                            if store_kc.lower().startswith("y"):
+                                try:
+                                    _store_passphrase_in_keychain(
+                                        "age-keys", "age-private-key", private_key)
+                                    print(
+                                        "stored private key in keychain (service=age-keys, account=age-private-key)")
+                                except Exception as e:
+                                    print(
+                                        f"warning: failed to store private key in keychain: {e}")
+                        else:
+                            # on non-macOS, do not prompt for keychain
+                            store_kc = "n"
+
         age_recipients = prompt(
             "Age recipients (comma-separated public recipients)", age_recipients)
         yub = prompt("Include YubiKey recipient by default? (y/n)",
@@ -545,8 +667,13 @@ def configure_interactive() -> dict:
         # optionally store passphrase now
         store_1p = prompt(
             "Store generated passphrase in 1Password? (y/n)", "n")
-        store_kc = prompt(
-            "Store generated passphrase in macOS Keychain? (y/n)", "n")
+        # keychain option is macOS-only
+        import sys
+        if sys.platform == "darwin":
+            store_kc = prompt(
+                "Store generated passphrase in macOS Keychain? (y/n)", "n")
+        else:
+            store_kc = "n"
 
         passphrase = None
         if store_1p.lower().startswith("y") or store_kc.lower().startswith("y"):
@@ -618,4 +745,181 @@ def verify_manifest(manifest_path: str) -> bool:
                 f"sha mismatch: {path} (expected {f.get('sha256')}, got {sha})")
             ok = False
     print("manifest verification:", "OK" if ok else "FAILED")
+    return ok
+
+
+def doctor() -> bool:
+    """Perform sanity checks on environment and configuration.
+
+    Prints a grouped, colorized summary of checks and returns True when all
+    critical checks pass. Colors are emitted only when stdout is a TTY.
+    """
+    import os
+    import sys
+
+    OK_ICON = "✅"
+    FAIL_ICON = "❌"
+    WARN_ICON = "⚠️"
+    INFO_ICON = "ℹ️"
+    HEADER_ICON = "🔎"
+
+    # enable colors only when stdout is a TTY and NO_COLOR is not set
+    use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+    def _color(text: str, code: str) -> str:
+        if not use_color:
+            return text
+        return f"\x1b[{code}m{text}\x1b[0m"
+
+    def _ok(msg: str):
+        icon = _color(OK_ICON, "32")
+        print(f" {icon}  {_color(msg, '0')}")
+
+    def _err(msg: str):
+        icon = _color(FAIL_ICON, "31")
+        print(f" {icon}  {_color(msg, '0')}")
+
+    def _warn(msg: str):
+        icon = _color(WARN_ICON, "33")
+        print(f" {icon}  {_color(msg, '0')}")
+
+    ok = True
+
+    # header
+    print()
+    title = f"{HEADER_ICON}  1p-exporter doctor — environment & configuration checks"
+    print(_color(title, "1;36"))
+    print(_color("─" * 52, "36"))
+
+    # Environment checks
+    print(_color("\nEnvironment:", "1;34"))
+    if not ensure_tool("op"):
+        _err("`op` (1Password CLI) not found in PATH")
+        ok = False
+    else:
+        _ok("`op` available")
+
+    # Tools availability (informational)
+    print(_color("\nTools:", "1;34"))
+
+    def _suggest_install_cmd(tool: str) -> str | None:
+        # map tool -> package name
+        pkg_map = {
+            "age": "age",
+            "age-keygen": "age",
+            "gpg": "gnupg",
+            "security": None,
+        }
+        pkg = pkg_map.get(tool, tool)
+
+        # macOS -> Homebrew or Xcode for `security`
+        if sys.platform == "darwin":
+            if ensure_tool("brew") and pkg:
+                return f"brew install {pkg}"
+            if tool == "security":
+                return "macOS: install Xcode Command Line Tools: `xcode-select --install`"
+            return f"install {pkg} via Homebrew (https://brew.sh/)" if pkg else None
+
+        # Linux: prefer apt, then dnf, then pacman
+        if ensure_tool("apt") and pkg:
+            return f"sudo apt install -y {pkg}"
+        if ensure_tool("dnf") and pkg:
+            return f"sudo dnf install -y {pkg}"
+        if ensure_tool("pacman") and pkg:
+            return f"sudo pacman -S --noconfirm {pkg}"
+
+        # fallback
+        return f"install package: {pkg}" if pkg else None
+
+    tools_to_check = ["age", "age-keygen", "gpg"]
+    # `security` is macOS-specific
+    if sys.platform == "darwin":
+        tools_to_check.append("security")
+
+    for _tool in tools_to_check:
+        try:
+            present = ensure_tool(_tool)
+        except Exception:
+            present = False
+        if present:
+            _ok(f"`{_tool}` available")
+        else:
+            suggestion = _suggest_install_cmd(_tool)
+            if suggestion:
+                _warn(f"`{_tool}` not found in PATH — suggestion: {suggestion}")
+            else:
+                _warn(f"`{_tool}` not found in PATH")
+
+    # Configuration checks
+    print(_color("\nConfiguration:", "1;34"))
+    cfg = load_config()
+    if not cfg:
+        _warn("config: not found (using defaults)")
+    else:
+        _ok(f"loaded from {_config_file_path()}")
+
+        encrypt = cfg.get("encrypt", "none")
+        if encrypt not in ("none", "gpg", "age"):
+            _err(f"invalid encrypt in config: {encrypt}")
+            ok = False
+        else:
+            _ok(f"encrypt={encrypt}")
+
+        # tool checks required by config
+        if encrypt == "gpg":
+            if not ensure_tool("gpg"):
+                _err("config requests gpg encryption but `gpg` not found")
+                ok = False
+            else:
+                _ok("`gpg` available")
+        if encrypt == "age":
+            if not ensure_tool("age"):
+                _err("config requests age encryption but `age` not found")
+                ok = False
+            else:
+                _ok("`age` available")
+
+        # formats
+        fmts = cfg.get("formats", ["json", "md"]) or []
+        invalid = [f for f in fmts if f not in ("json", "md")]
+        if invalid:
+            _err(f"invalid formats in config: {', '.join(invalid)}")
+            ok = False
+        else:
+            _ok(f"formats={','.join(fmts)}")
+
+    # Age-specific checks (separated so they read nicely)
+    age_cfg = (cfg.get("age", {}) if cfg else {}) or {}
+    if age_cfg:
+        print(_color("\nAge/passphrase checks:", "1;34"))
+        pass_source = age_cfg.get("pass_source")
+        if pass_source:
+            _ok(f"age.pass_source={pass_source}")
+            if pass_source == "keychain":
+                try:
+                    import keyring  # type: ignore
+                    _ok("keyring available for keychain access")
+                except Exception:
+                    if sys.platform == "darwin" and ensure_tool("security"):
+                        _ok("macOS `security` available for keychain access")
+                    else:
+                        _err(
+                            "keychain pass_source configured but keyring/security not available")
+                        ok = False
+            if pass_source == "env":
+                if os.environ.get("BACKUP_PASSPHRASE"):
+                    _ok("BACKUP_PASSPHRASE present in environment")
+                else:
+                    _warn("age.pass_source=env but BACKUP_PASSPHRASE is not set")
+        recipients = (age_cfg.get("recipients") or "").strip()
+        if recipients:
+            _ok("age.recipients configured")
+
+    # final summary
+    print(_color("\n" + "─" * 52, "36"))
+    summary_icon = OK_ICON if ok else FAIL_ICON
+    summary_color = "32" if ok else "31"
+    print(
+        f"doctor result: {_color(summary_icon + ' ' + ('OK' if ok else 'FAILED'), summary_color)}")
+    print()
     return ok

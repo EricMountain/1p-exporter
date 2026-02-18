@@ -1,6 +1,6 @@
 import argparse
 import sys
-from .exporter import run_backup, verify_manifest, load_config, configure_interactive, init_setup, OpExporter
+from .exporter import run_backup, verify_manifest, load_config, configure_interactive, init_setup, OpExporter, doctor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,16 +16,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma-separated formats to write (json,md). Overrides saved config")
     b.add_argument("--encrypt", choices=["gpg", "age", "none"],
                    default=argparse.SUPPRESS, help="encrypt archive (gpg/age) or none — overrides saved config")
-    b.add_argument("--age-pass-source", choices=["env", "prompt", "1password", "keychain"], default=argparse.SUPPRESS,
-                   help="where to obtain the age passphrase when using age (env=BACKUP_PASSPHRASE, prompt=ask, 1password=read from item, keychain=macOS keychain). Overrides saved config")
+    # age-pass-source: include 'keychain' only on macOS
+    is_macos = sys.platform == "darwin"
+    age_pass_choices = ["env", "prompt", "1password",
+                        "keychain"] if is_macos else ["env", "prompt", "1password"]
+    age_pass_help = ("where to obtain the age passphrase when using age (env=BACKUP_PASSPHRASE, prompt=ask, 1password=read from item, keychain=macOS keychain). Overrides saved config"
+                     if is_macos else
+                     "where to obtain the age passphrase when using age (env=BACKUP_PASSPHRASE, prompt=ask, 1password=read from item). Overrides saved config")
+    b.add_argument("--age-pass-source", choices=age_pass_choices, default=argparse.SUPPRESS,
+                   help=age_pass_help)
     b.add_argument("--age-pass-item", default=argparse.SUPPRESS,
                    help="1Password item title or id that contains the passphrase (used when --age-pass-source=1password)")
     b.add_argument("--age-pass-field", default=argparse.SUPPRESS,
                    help="field name inside the 1Password item to use for the passphrase (default: 'password')")
+    # keychain-related flags are macOS-specific — hide them from help on other platforms
+    keychain_help = "macOS keychain service name (when using --age-pass-source keychain)" if is_macos else argparse.SUPPRESS
     b.add_argument("--age-keychain-service", default=argparse.SUPPRESS,
-                   help="macOS keychain service name (when using --age-pass-source keychain)")
+                   help=keychain_help)
+    keychain_user_help = "macOS keychain account/username (when using --age-pass-source keychain)" if is_macos else argparse.SUPPRESS
     b.add_argument("--age-keychain-username", default=argparse.SUPPRESS,
-                   help="macOS keychain account/username (when using --age-pass-source keychain)")
+                   help=keychain_user_help)
     b.add_argument("--age-recipients", default=argparse.SUPPRESS,
                    help="comma-separated age public recipients (optional)")
     b.add_argument("--age-use-yubikey", action="store_true", default=argparse.SUPPRESS,
@@ -46,12 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--passphrase", help="provide a passphrase to store instead of generating")
     i.add_argument("--store-in-1password",
                    help="store generated/provided passphrase in 1Password (item title)")
+    # keychain flags are macOS-only; keep attributes available but hide on other platforms
+    store_in_keychain_help = "store generated/provided passphrase in macOS Keychain" if sys.platform == "darwin" else argparse.SUPPRESS
     i.add_argument("--store-in-keychain", action="store_true",
-                   help="store generated/provided passphrase in macOS Keychain")
+                   help=store_in_keychain_help)
+    keychain_service_help = "keychain service name to store under" if sys.platform == "darwin" else argparse.SUPPRESS
     i.add_argument("--keychain-service", default="1p-exporter",
-                   help="keychain service name to store under")
+                   help=keychain_service_help)
+    keychain_user_help = "keychain account/username" if sys.platform == "darwin" else argparse.SUPPRESS
     i.add_argument("--keychain-username", default="backup",
-                   help="keychain account/username")
+                   help=keychain_user_help)
     i.add_argument("--onepassword-field", default="password",
                    help="field name to use when storing in 1Password")
     i.add_argument("--onepassword-vault",
@@ -61,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("verify", help="Verify a produced manifest and files")
     v.add_argument("manifest", help="path to manifest.json")
+
+    d = sub.add_parser(
+        "doctor", help="Sanity-check environment and configuration")
 
     return p
 
@@ -144,8 +161,15 @@ def main(argv=None):
                 keychain_username=args.keychain_username,
                 onepassword_field=args.onepassword_field,
             )
+
+        # After initialization, run a `doctor` check on the generated configuration
+        ok = doctor()
+        sys.exit(0 if ok else 2)
     elif args.cmd == "verify":
         ok = verify_manifest(args.manifest)
+        sys.exit(0 if ok else 2)
+    elif args.cmd == "doctor":
+        ok = doctor()
         sys.exit(0 if ok else 2)
     else:
         parser.print_help()
