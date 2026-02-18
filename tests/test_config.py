@@ -101,8 +101,8 @@ def test_cli_init_interactive_runs_doctor(monkeypatch):
 
 
 def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_path):
-    """Interactive init should offer to generate an age keypair, add the public recipient to config,
-    and store the private key in 1Password/keychain when requested."""
+    """Interactive init should generate an age keypair, store private key and passphrase
+    in a single 1Password Secure Note item, and include the public recipient in config."""
     import builtins
     import onep_exporter.exporter as exporter_module
 
@@ -120,48 +120,36 @@ def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_pat
     def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
         if cmd[0] == "age-keygen":
             return 0, age_out, ""
-        return 0, "", ""
+        return 0, "{}", ""
 
     monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
 
-    stored = {"1p_called": False, "kc_called": False}
+    upserted = {}
 
-    def fake_store_1p(self, title, field, pw, vault=None):
-        stored["1p_called"] = True
-        # ensure private key stored matches generated block
-        assert pw.strip().startswith("-----BEGIN AGE PRIVATE KEY-----")
-        return {"id": "fake-age-item"}
+    def fake_ensure_secrets_item(self, title, vault=None):
+        return {"id": "fake-item-id", "fields": []}  # no existing fields
+
+    def fake_upsert_item_field(self, item_id, field_label, value, field_type="CONCEALED"):
+        upserted[field_label] = {"value": value, "field_type": field_type, "item_id": item_id}
+        return {"id": item_id}
 
     monkeypatch.setattr(exporter_module.OpExporter,
-                        "store_passphrase_in_1password", fake_store_1p)
-
-    def fake_store_kc(service, username, pw):
-        stored["kc_called"] = True
-        assert "private-body" in pw
-
-    monkeypatch.setattr(
-        exporter_module, "_store_passphrase_in_keychain", fake_store_kc)
-
-    # simulate interactive inputs (sequence)
-    import sys
-    monkeypatch.setattr(sys, "platform", "darwin")
+                        "ensure_secrets_item", fake_ensure_secrets_item)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "upsert_item_field", fake_upsert_item_field)
 
     inputs = iter([
-        "",     # Default backup directory (accept)
-        "",     # formats (accept)
-        "",     # encrypt (accept default 'age')
-        "",     # download_attachments (accept)
-        "prompt",  # age_pass_source
-        "y",    # Generate a new age keypair? -> yes
-        "y",    # Store private key in 1Password? -> yes
-        "My Age Key",  # 1Password item title
-        "",     # 1Password field name (accept default)
-        "",     # 1Password vault (optional)
-        "y",    # Store private key in macOS Keychain? -> yes
-        "",     # age_recipients (accept default which includes generated pub)
-        "n",    # include yubikey? -> no
-        "n",    # Store generated passphrase in 1Password? (no)
-        "n",    # Store generated passphrase in Keychain? (no)
+        "",       # Default backup directory (accept)
+        "",       # formats (accept)
+        "",       # encrypt (accept default 'age')
+        "",       # download_attachments (accept)
+        "",       # 1Password item title (accept default)
+        "",       # 1Password vault (optional)
+        "prompt", # age_pass_source
+        "y",      # Generate a new age keypair? -> yes
+        "",       # age_recipients (accept default including generated pub)
+        "n",      # include yubikey? -> no
+        "y",      # Generate a new passphrase? -> yes
     ])
 
     monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs))
@@ -171,12 +159,20 @@ def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_pat
 
     # config should contain the generated public recipient
     assert cfg["age"]["recipients"] == public_recipient
-    assert stored["1p_called"] is True
-    assert stored["kc_called"] is True
+    # private key should have been stored via upsert
+    assert "age_private_key" in upserted
+    assert upserted["age_private_key"]["value"].startswith("-----BEGIN AGE PRIVATE KEY-----")
+    # passphrase should have been stored
+    assert "passphrase" in upserted
+    assert len(upserted["passphrase"]["value"]) > 0
+    # recipients should have been stored
+    assert "age_recipients" in upserted
+    assert upserted["age_recipients"]["field_type"] == "TEXT"
 
 
 def test_configure_interactive_parses_commented_public_and_secret_token(monkeypatch, tmp_path):
-    """Ensure parser accepts commented public-key lines and AGE-SECRET-KEY tokens."""
+    """Ensure parser accepts commented public-key lines and AGE-SECRET-KEY tokens,
+    and stores both in a single 1Password item via upsert."""
     import builtins
     import onep_exporter.exporter as exporter_module
 
@@ -198,43 +194,73 @@ def test_configure_interactive_parses_commented_public_and_secret_token(monkeypa
     def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
         if cmd[0] == "age-keygen":
             return 0, next(seq), ""
-        return 0, "", ""
+        return 0, "{}", ""
 
     monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
 
-    stored = {"1p": [], "kc": []}
+    upserted_all = []
 
-    def fake_store_1p(self, title, field, pw, vault=None):
-        stored["1p"].append(pw)
-        return {"id": "ok"}
+    def fake_ensure_secrets_item(self, title, vault=None):
+        return {"id": "fake-item", "fields": []}
+
+    def fake_upsert(self, item_id, field_label, value, field_type="CONCEALED"):
+        upserted_all.append({"label": field_label, "value": value, "type": field_type})
+        return {"id": item_id}
 
     monkeypatch.setattr(exporter_module.OpExporter,
-                        "store_passphrase_in_1password", fake_store_1p)
-    monkeypatch.setattr(exporter_module, "_store_passphrase_in_keychain",
-                        lambda s, u, p: stored["kc"].append(p))
+                        "ensure_secrets_item", fake_ensure_secrets_item)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "upsert_item_field", fake_upsert)
 
-    import sys
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    # run first interactive (out_a)
-    inputs_a = iter(["", "", "", "", "prompt", "y", "y",
-                    "T1", "", "", "y", "", "n", "n", "n"])
+    # run first interactive (out_a — PEM block)
+    inputs_a = iter([
+        "", "", "", "",     # basics
+        "", "",             # 1P item title + vault
+        "prompt",           # pass source
+        "y",                # generate keypair
+        "",                 # recipients (accept default)
+        "n",                # yubikey
+        "y",                # generate passphrase
+    ])
     monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs_a))
     cfg1 = exporter_module.configure_interactive()
     assert cfg1["age"]["recipients"] == pub_a
-    assert stored["1p"][0].startswith("-----BEGIN AGE PRIVATE KEY-----")
+    # private key stored should be PEM block
+    pk_entry = [u for u in upserted_all if u["label"] == "age_private_key"][0]
+    assert pk_entry["value"].startswith("-----BEGIN AGE PRIVATE KEY-----")
 
-    # run second interactive (out_b)
-    inputs_b = iter(["", "", "", "", "prompt", "y", "y",
-                    "T2", "", "", "y", "", "n", "n", "n"])
+    # reset upserted list for second run
+    upserted_all.clear()
+
+    # For second run, load config from first run.
+    # The ensure_secrets_item now returns existing recipients from first run
+    # but no existing private key (simulating a fresh item for the second format test)
+    def fake_ensure_secrets_item_2(self, title, vault=None):
+        return {"id": "fake-item-2", "fields": [
+            {"label": "age_recipients", "value": pub_a}
+        ]}
+
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "ensure_secrets_item", fake_ensure_secrets_item_2)
+
+    # run second interactive (out_b — AGE-SECRET-KEY token)
+    inputs_b = iter([
+        "", "", "", "",     # basics
+        "", "",             # 1P item title + vault
+        "prompt",           # pass source
+        "y",                # generate keypair
+        "",                 # recipients (accept default — should include both)
+        "n",                # yubikey
+        "y",                # generate passphrase
+    ])
     monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs_b))
     cfg2 = exporter_module.configure_interactive()
     # new recipient should be present and previous recipient preserved
     assert pub_b in cfg2["age"]["recipients"]
     assert pub_a in cfg2["age"]["recipients"]
-    # secret token stored in 1Password/keychain
-    assert secret_b in stored["1p"][1]
-    assert secret_b in stored["kc"][1]
+    # secret token stored via upsert
+    pk_entry_2 = [u for u in upserted_all if u["label"] == "age_private_key"][0]
+    assert secret_b in pk_entry_2["value"]
 
 
 def test_default_private_key_title_includes_username(monkeypatch, tmp_path):
@@ -252,50 +278,170 @@ def test_default_private_key_title_includes_username(monkeypatch, tmp_path):
     age_out = "-----BEGIN AGE PRIVATE KEY-----\npriv-default\n-----END AGE PRIVATE KEY-----\npublic key: " + \
         public_recipient + "\n"
     monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True,
-                        check=True, input=None: (0, age_out, "") if cmd[0] == "age-keygen" else (0, "", ""))
+                        check=True, input=None: (0, age_out, "") if cmd[0] == "age-keygen" else (0, "{}", ""))
 
     captured = {"title": None}
 
-    def fake_store_1p(self, title, field, pw, vault=None):
+    def fake_ensure_secrets_item(self, title, vault=None):
         captured["title"] = title
-        return {"id": "ok"}
+        return {"id": "fake-item", "fields": []}
+
+    def fake_upsert(self, item_id, field_label, value, field_type="CONCEALED"):
+        return {"id": item_id}
 
     monkeypatch.setattr(exporter_module.OpExporter,
-                        "store_passphrase_in_1password", fake_store_1p)
-    monkeypatch.setattr(
-        exporter_module, "_store_passphrase_in_keychain", lambda s, u, p: None)
+                        "ensure_secrets_item", fake_ensure_secrets_item)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "upsert_item_field", fake_upsert)
 
     # ensure getuser returns a known value
     monkeypatch.setattr(getpass, "getuser", lambda: "ci-user")
 
-    import sys
-    monkeypatch.setattr(sys, "platform", "darwin")
-
     # interactive inputs: accept defaults for title (empty string)
     inputs = iter([
-        "",     # Default backup directory
-        "",     # formats
-        "",     # encrypt (age)
-        "",     # download_attachments
-        "prompt",  # age_pass_source
-        "y",    # Generate age keypair
-        "y",    # Store private key in 1Password?
-        "",     # Accept default title
-        "",     # Accept default field
-        "",     # vault (optional)
-        "n",    # Store private key in keychain? -> no
-        "",     # age_recipients (accept default)
-        "n",    # yubikey? no
-        "n",    # store passphrase in 1Password? no
-        "n",    # store passphrase in keychain? no
+        "",       # Default backup directory
+        "",       # formats
+        "",       # encrypt (age)
+        "",       # download_attachments
+        "",       # Accept default 1P item title
+        "",       # vault (optional)
+        "prompt", # age_pass_source
+        "y",      # Generate age keypair
+        "",       # age_recipients (accept default)
+        "n",      # yubikey? no
+        "y",      # Generate passphrase? yes
     ])
     monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs))
 
     cfg = exporter_module.configure_interactive()
 
-    expected = "1Password backup - ci-user - Age private key"
+    expected = "1p-exporter backup - ci-user"
     assert captured["title"] == expected
     assert public_recipient in cfg["age"]["recipients"]
+
+
+def test_configure_interactive_reuses_existing_secrets(monkeypatch, tmp_path):
+    """When the 1P item already has a private key and passphrase the user should be
+    asked whether to reuse them. Choosing 'yes' must NOT overwrite anything."""
+    import builtins
+    import onep_exporter.exporter as exporter_module
+
+    cfg_path = tmp_path / "cfg4.json"
+    monkeypatch.setenv("ONEP_EXPORTER_CONFIG", str(cfg_path))
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
+    # no age-keygen call should happen
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[0] == "age-keygen":
+            raise AssertionError("age-keygen should not be called when reusing")
+        return 0, "{}", ""
+
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    upserted = {}
+
+    def fake_ensure_secrets_item(self, title, vault=None):
+        return {
+            "id": "existing-item",
+            "fields": [
+                {"label": "age_private_key", "value": "AGE-SECRET-KEY-EXISTING"},
+                {"label": "passphrase", "value": "existing-passphrase"},
+                {"label": "age_recipients", "value": "age1existingrecipient"},
+            ],
+        }
+
+    def fake_upsert(self, item_id, field_label, value, field_type="CONCEALED"):
+        upserted[field_label] = value
+        return {"id": item_id}
+
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "ensure_secrets_item", fake_ensure_secrets_item)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "upsert_item_field", fake_upsert)
+
+    inputs = iter([
+        "", "", "", "",    # basics
+        "", "",            # 1P item title + vault
+        "prompt",          # pass source
+        "y",               # Reuse existing private key? -> yes
+        "",                # recipients (accept existing)
+        "n",               # yubikey
+        "y",               # Reuse existing passphrase? -> yes
+    ])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs))
+
+    cfg = exporter_module.configure_interactive()
+
+    # existing recipients should be preserved
+    assert "age1existingrecipient" in cfg["age"]["recipients"]
+    # private key and passphrase should NOT have been overwritten
+    assert "age_private_key" not in upserted
+    assert "passphrase" not in upserted
+
+
+def test_configure_interactive_overwrites_existing_secrets(monkeypatch, tmp_path):
+    """When the user chooses to overwrite, new keypair and passphrase should be generated
+    and stored, but existing values must NOT be displayed."""
+    import builtins
+    import onep_exporter.exporter as exporter_module
+
+    cfg_path = tmp_path / "cfg5.json"
+    monkeypatch.setenv("ONEP_EXPORTER_CONFIG", str(cfg_path))
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
+    public_recipient = "age1newpub"
+    age_out = "AGE-SECRET-KEY-1NEWKEY\npublic key: " + public_recipient + "\n"
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[0] == "age-keygen":
+            return 0, age_out, ""
+        return 0, "{}", ""
+
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    upserted = {}
+
+    def fake_ensure_secrets_item(self, title, vault=None):
+        return {
+            "id": "existing-item",
+            "fields": [
+                {"label": "age_private_key", "value": "AGE-SECRET-KEY-OLD"},
+                {"label": "passphrase", "value": "old-passphrase"},
+                {"label": "age_recipients", "value": "age1oldrecipient"},
+            ],
+        }
+
+    def fake_upsert(self, item_id, field_label, value, field_type="CONCEALED"):
+        upserted[field_label] = value
+        return {"id": item_id}
+
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "ensure_secrets_item", fake_ensure_secrets_item)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "upsert_item_field", fake_upsert)
+
+    inputs = iter([
+        "", "", "", "",    # basics
+        "", "",            # 1P item title + vault
+        "prompt",          # pass source
+        "n",               # Reuse existing private key? -> NO (overwrite)
+        "",                # recipients (accept default, should have new pub)
+        "n",               # yubikey
+        "n",               # Reuse existing passphrase? -> NO (overwrite)
+    ])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(inputs))
+
+    cfg = exporter_module.configure_interactive()
+
+    # new recipient should be present
+    assert public_recipient in cfg["age"]["recipients"]
+    # private key should have been overwritten with the new one
+    assert "age_private_key" in upserted
+    assert upserted["age_private_key"] == "AGE-SECRET-KEY-1NEWKEY"
+    # passphrase should have been overwritten with a new generated value
+    assert "passphrase" in upserted
+    assert upserted["passphrase"] != "old-passphrase"
+    assert len(upserted["passphrase"]) > 0
 
 
 def test_cli_init_flagged_runs_doctor_failure(monkeypatch):

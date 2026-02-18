@@ -7,12 +7,13 @@
     "encrypt": "age",
     "download_attachments": true,
     "age": {
-        "pass_source": "keychain",
-        "pass_item": "Backup Passphrase",
-        "pass_field": "password",
+        "pass_source": "1password",
+        "pass_item": "1p-exporter backup - <your-username>",
+        "pass_field": "passphrase",
         "recipients": "",
         "use_yubikey": false,
         "keychain_service": "1p-exporter",
-        "keychain_username": "backup"
+        "keychain_username": "backup",
+        "onepassword_vault": null
     }
 }

@@ -124,6 +124,38 @@ class OpExporter:
         _, out, _ = run_cmd(cmd, input=json.dumps(payload).encode())
         return json.loads(out)
 
+    def ensure_secrets_item(self, title: str, vault: Optional[str] = None) -> dict:
+        """Ensure a Secure Note item exists in 1Password for storing backup secrets.
+
+        Creates an empty Secure Note if one with the given title doesn't exist.
+        Returns the item JSON (existing or newly created).
+        """
+        existing = self.find_item_by_title(title, vault=vault)
+        if existing:
+            return existing
+        payload = {"title": title, "fields": []}
+        cmd = ["op", "item", "create", "--category", "Secure Note",
+               "--format", "json"]
+        if vault:
+            cmd.extend(["--vault", vault])
+        cmd.append("-")
+        _, out, _ = run_cmd(cmd, input=json.dumps(payload).encode())
+        return json.loads(out)
+
+    def upsert_item_field(self, item_id: str, field_label: str, value: str,
+                          field_type: str = "CONCEALED") -> dict:
+        """Add or update a field on an existing 1Password item.
+
+        Uses ``op item edit`` with assignment syntax.
+        field_type should be 'CONCEALED' or 'TEXT'.
+        Returns the updated item JSON.
+        """
+        type_str = "concealed" if field_type == "CONCEALED" else "text"
+        assignment = f"{field_label}[type={type_str}]={value}"
+        cmd = ["op", "item", "edit", item_id, assignment, "--format", "json"]
+        _, out, _ = run_cmd(cmd)
+        return json.loads(out)
+
     def signin_interactive(self, account: Optional[str] = None) -> str:
         """Run `op signin --raw` to obtain a session token (user will be prompted; Touch ID may be used by the 1Password app).
 
@@ -417,6 +449,76 @@ def _store_passphrase_in_keychain(service: str, username: str, passphrase: str) 
             service, "-a", username, "-w", passphrase, "-U"])
 
 
+def _item_field_value(item: dict, field_name: str) -> Optional[str]:
+    """Extract a field value from a 1Password item dict by label or name."""
+    for f in (item.get("fields") or []):
+        if f.get("label") == field_name or f.get("name") == field_name:
+            val = f.get("value")
+            if isinstance(val, str) and val:
+                return val
+    return None
+
+
+def _generate_age_keypair_and_store(exporter: 'OpExporter', item_id: str) -> Optional[str]:
+    """Generate an age keypair, store private key in the given 1Password item.
+
+    Returns the public recipient string on success, or None on failure.
+    """
+    if not ensure_tool("age-keygen"):
+        print("warning: 'age-keygen' not available; cannot generate age keypair")
+        return None
+
+    try:
+        _, out, _ = run_cmd(["age-keygen"])
+    except Exception as e:
+        print(f"warning: failed to generate age keypair: {e}")
+        return None
+
+    import re
+    private_key = None
+    pub = None
+
+    # PEM-like block
+    m_block = re.search(
+        r"(-----BEGIN AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----.*?-----END AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----)", out, re.S)
+    if m_block:
+        private_key = m_block.group(1).strip()
+
+    # AGE-SECRET-KEY token
+    if not private_key:
+        m_secret = re.search(r"(AGE-SECRET-KEY-[0-9A-Za-z\-_=]+)", out)
+        if m_secret:
+            private_key = m_secret.group(1).strip()
+
+    # comment line fallback
+    if not private_key:
+        m_line = re.search(r"(?m)^\s*#?\s*(?:secret|secret key):\s*(\S+)", out)
+        if m_line:
+            private_key = m_line.group(1).strip()
+
+    # public key
+    m_pub = re.search(r"(?m)^\s*#?\s*public key:\s*(age1[0-9a-z]+)", out)
+    if m_pub:
+        pub = m_pub.group(1)
+    else:
+        m_any = re.search(r"(age1[0-9a-z]+)", out)
+        if m_any:
+            pub = m_any.group(1)
+
+    if not private_key or not pub:
+        print("warning: could not parse generated age keypair output")
+        return None
+
+    # Store private key in 1Password item
+    try:
+        exporter.upsert_item_field(item_id, "age_private_key", private_key)
+    except Exception as e:
+        print(f"warning: failed to store private key in 1Password: {e}")
+
+    print(f"Generated age recipient: {pub}")
+    return pub
+
+
 def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, store_in_1password: Optional[str] = None, onepassword_vault: Optional[str] = None, store_in_keychain: bool = False, keychain_service: str = "1p-exporter", keychain_username: str = "backup", onepassword_field: str = "password") -> str:
     """Create or store an age passphrase according to provided options.
 
@@ -506,16 +608,13 @@ def load_config() -> dict:
 def configure_interactive() -> dict:
     """Interactive setup helper that prompts for common options and persists them.
 
-    The helper will ask for:
-      - default output directory
-      - formats
-      - encryption choice (none/gpg/age)
-      - age passphrase source and storage (1Password / keychain / prompt / env)
-      - whether to store passphrase in 1Password/keychain
-      - optional age recipients
+    When age encryption is chosen, all secrets (private key, passphrase) are stored
+    in a single 1Password Secure Note item.  Existing secrets are detected and the
+    user is offered the choice to reuse or overwrite them.
     """
     import getpass
     import os
+    import secrets
 
     print("Interactive setup — configure defaults for 1p-exporter backups")
     cfg = load_config()
@@ -538,170 +637,116 @@ def configure_interactive() -> dict:
     age_cfg = cfg.get("age", {})
     age_pass_source = None
     age_pass_item = None
-    age_pass_field = age_cfg.get("pass_field", "password")
+    age_pass_field = "passphrase"
     age_keychain_service = age_cfg.get("keychain_service", "1p-exporter")
     age_keychain_username = age_cfg.get("keychain_username", "backup")
     age_recipients = age_cfg.get("recipients", "")
     age_use_yubikey = age_cfg.get("use_yubikey", False)
+    op_vault = None
 
     if encrypt == "age":
         import sys
         is_macos = sys.platform == "darwin"
 
-        # only mention keychain option when running on macOS
+        # --- single 1Password item for all secrets ---
+        default_title = age_cfg.get(
+            "pass_item") or f"1p-exporter backup - {getpass.getuser()}"
+        op_item_title = prompt(
+            "1Password item title for backup secrets", default_title)
+        op_vault = prompt("1Password vault (optional)",
+                          age_cfg.get("onepassword_vault") or None)
+        age_pass_item = op_item_title
+
+        # passphrase source (for backup-time retrieval)
         pass_source_choices = "env/prompt/1password/keychain" if is_macos else "env/prompt/1password"
-        default_pass_source = age_cfg.get(
-            "pass_source", "keychain" if is_macos else "prompt")
+        default_pass_source = age_cfg.get("pass_source", "1password")
         age_pass_source = prompt(
             f"age passphrase source ({pass_source_choices})", default_pass_source)
-        if age_pass_source == "1password":
-            age_pass_item = prompt("1Password item title for passphrase (item title)", age_cfg.get(
-                "pass_item", "My Backup Passphrase"))
-            age_pass_field = prompt("1Password field name", age_pass_field)
         if is_macos and age_pass_source == "keychain":
             age_keychain_service = prompt(
                 "Keychain service name", age_keychain_service)
             age_keychain_username = prompt(
                 "Keychain account name", age_keychain_username)
 
-        # offer to generate an age keypair and add its public recipient
-        gen_age = prompt("Generate a new age keypair? (y/n)", "n")
-        if gen_age.lower().startswith("y"):
-            if not ensure_tool("age-keygen"):
-                print(
-                    "warning: 'age-keygen' not available; cannot generate age recipient")
-            else:
-                try:
-                    _, out, _ = run_cmd(["age-keygen"])
-                except Exception as e:
-                    print(f"warning: failed to generate age keypair: {e}")
-                else:
-                    # extract private key (support multiple age-keygen output formats) and public recipient
-                    import re
-                    private_key = None
-                    pub = None
+        # --- ensure the 1Password item exists and inspect existing fields ---
+        exporter = OpExporter()
+        item = exporter.ensure_secrets_item(
+            op_item_title, vault=op_vault or None)
+        item_id = item.get("id")
 
-                    # 1) full PEM-like AGE private key / key-file block (several variants used in the wild)
-                    m_block = re.search(
-                        r"(-----BEGIN AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----.*?-----END AGE (?:PRIVATE KEY|KEY FILE|KEY-FILE)-----)", out, re.S)
-                    if m_block:
-                        private_key = m_block.group(1).strip()
+        existing_private_key = _item_field_value(item, "age_private_key")
+        existing_passphrase = _item_field_value(item, "passphrase")
+        existing_recipients = _item_field_value(item, "age_recipients")
 
-                    # 2) secret-token style (AGE-SECRET-KEY-1...)
-                    if not private_key:
-                        m_secret = re.search(
-                            r"(AGE-SECRET-KEY-[0-9A-Za-z\-_=]+)", out)
-                        if m_secret:
-                            private_key = m_secret.group(1).strip()
+        # --- age keypair ---
+        generated_pub = None
+        if existing_private_key:
+            reuse = prompt(
+                "Existing age private key found in 1Password. Reuse? (y/n)", "y")
+            if not reuse.lower().startswith("y"):
+                generated_pub = _generate_age_keypair_and_store(
+                    exporter, item_id)
+        else:
+            gen_key = prompt("Generate a new age keypair? (y/n)", "y")
+            if gen_key.lower().startswith("y"):
+                generated_pub = _generate_age_keypair_and_store(
+                    exporter, item_id)
 
-                    # 3) comment/key-file lines like "# secret key: ..."
-                    if not private_key:
-                        m_line = re.search(
-                            r"(?m)^\s*#?\s*(?:secret|secret key):\s*(\S+)", out)
-                        if m_line:
-                            private_key = m_line.group(1).strip()
-
-                    # public recipient: accept commented or plain "public key: age1..." or any age1 token
-                    m_pub = re.search(
-                        r"(?m)^\s*#?\s*public key:\s*(age1[0-9a-z]+)", out)
-                    if m_pub:
-                        pub = m_pub.group(1)
-                    else:
-                        m_any = re.search(r"(age1[0-9a-z]+)", out)
-                        if m_any:
-                            pub = m_any.group(1)
-
-                    if not private_key or not pub:
-                        print("warning: could not parse generated age keypair output")
-                    else:
-                        print(f"Generated age recipient: {pub}")
-                        if age_recipients:
-                            age_recipients = age_recipients + "," + pub
-                        else:
-                            age_recipients = pub
-
-                        # offer to store private key in 1Password
-                        store1p = prompt(
-                            "Store private key in 1Password? (y/n)", "n")
-                        if store1p.lower().startswith("y"):
-                            # default includes current OS username to make items discoverable
-                            default_title = f"1Password backup - {getpass.getuser()} - Age private key"
-                            title = prompt(
-                                "1Password item title for private key", default_title)
-                            field = prompt(
-                                "1Password field name", "private_key")
-                            vault = prompt(
-                                "1Password vault to store the private key in (optional)", None)
-                            try:
-                                OpExporter().store_passphrase_in_1password(
-                                    title, field, private_key, vault=vault)
-                            except Exception as e:
-                                # print sanitized error (CommandError now redacts secrets)
-                                print(
-                                    f"warning: failed to store private key in 1Password: {e}")
-
-                        # offer to store private key in macOS Keychain (only on macOS)
-                        import sys
-                        if sys.platform == "darwin":
-                            store_kc = prompt(
-                                "Store private key in macOS Keychain? (y/n)", "n")
-                            if store_kc.lower().startswith("y"):
-                                try:
-                                    _store_passphrase_in_keychain(
-                                        "age-keys", "age-private-key", private_key)
-                                    print(
-                                        "stored private key in keychain (service=age-keys, account=age-private-key)")
-                                except Exception as e:
-                                    print(
-                                        f"warning: failed to store private key in keychain: {e}")
-                        else:
-                            # on non-macOS, do not prompt for keychain
-                            store_kc = "n"
+        # --- recipients ---
+        default_recipients = existing_recipients or age_recipients or ""
+        if generated_pub:
+            parts = [r.strip()
+                     for r in default_recipients.split(",") if r.strip()]
+            if generated_pub not in parts:
+                parts.append(generated_pub)
+            default_recipients = ",".join(parts)
 
         age_recipients = prompt(
-            "Age recipients (comma-separated public recipients)", age_recipients)
+            "Age recipients (comma-separated public recipients)",
+            default_recipients or None)
+        # store recipients in 1P item
+        if age_recipients:
+            try:
+                exporter.upsert_item_field(
+                    item_id, "age_recipients", age_recipients, field_type="TEXT")
+            except Exception as e:
+                print(f"warning: failed to store recipients in 1Password: {e}")
+
         yub = prompt("Include YubiKey recipient by default? (y/n)",
                      "y" if age_use_yubikey else "n")
         age_use_yubikey = yub.lower().startswith("y")
 
-        # optionally store passphrase now
-        store_1p = prompt(
-            "Store generated passphrase in 1Password? (y/n)", "n")
-        # keychain option is macOS-only
-        import sys
-        if sys.platform == "darwin":
-            store_kc = prompt(
-                "Store generated passphrase in macOS Keychain? (y/n)", "n")
-        else:
-            store_kc = "n"
-
-        passphrase = None
-        if store_1p.lower().startswith("y") or store_kc.lower().startswith("y"):
-            # ask whether to generate or provide
-            gen = prompt("Generate a new passphrase? (y/n)", "y")
-            if gen.lower().startswith("y"):
-                import secrets
-
+        # --- passphrase ---
+        if existing_passphrase:
+            reuse_pp = prompt(
+                "Existing passphrase found in 1Password. Reuse? (y/n)", "y")
+            if not reuse_pp.lower().startswith("y"):
                 passphrase = secrets.token_urlsafe(32)
-                print("Generated passphrase — it will be stored as requested.")
+                try:
+                    exporter.upsert_item_field(
+                        item_id, "passphrase", passphrase)
+                except Exception as e:
+                    print(
+                        f"warning: failed to store passphrase in 1Password: {e}")
+                print(f"New passphrase stored in 1Password item "
+                      f"'{op_item_title}', field 'passphrase'.")
+                print(f"To export it safely, use:  "
+                      f"op item get '{op_item_title}' --field passphrase")
+        else:
+            gen_pp = prompt("Generate a new passphrase? (y/n)", "y")
+            if gen_pp.lower().startswith("y"):
+                passphrase = secrets.token_urlsafe(32)
             else:
                 passphrase = getpass.getpass("Enter passphrase to store: ")
-
-            # store where requested
-            if store_1p.lower().startswith("y"):
-                vault = prompt(
-                    "1Password vault to store the passphrase in (optional)", age_cfg.get("vault"))
-                try:
-                    init_setup(passphrase=passphrase, generate=False, store_in_1password="Backup Passphrase",
-                               onepassword_vault=vault, onepassword_field=age_pass_field)
-                except Exception as e:
-                    print(f"warning: failed to store in 1Password: {e}")
-            if store_kc.lower().startswith("y"):
-                try:
-                    init_setup(passphrase=passphrase, generate=False, store_in_keychain=True,
-                               keychain_service=age_keychain_service, keychain_username=age_keychain_username)
-                except Exception as e:
-                    print(f"warning: failed to store in keychain: {e}")
+            try:
+                exporter.upsert_item_field(item_id, "passphrase", passphrase)
+            except Exception as e:
+                print(
+                    f"warning: failed to store passphrase in 1Password: {e}")
+            print(f"Passphrase stored in 1Password item "
+                  f"'{op_item_title}', field 'passphrase'.")
+            print(f"To export it safely, use:  "
+                  f"op item get '{op_item_title}' --field passphrase")
 
     # assemble global config
     new_cfg = {
@@ -717,6 +762,7 @@ def configure_interactive() -> dict:
             "use_yubikey": bool(age_use_yubikey),
             "keychain_service": age_keychain_service,
             "keychain_username": age_keychain_username,
+            "onepassword_vault": op_vault or None,
         },
     }
 
