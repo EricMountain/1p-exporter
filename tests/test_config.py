@@ -130,7 +130,8 @@ def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_pat
         return {"id": "fake-item-id", "fields": []}  # no existing fields
 
     def fake_upsert_item_field(self, item_id, field_label, value, field_type="CONCEALED"):
-        upserted[field_label] = {"value": value, "field_type": field_type, "item_id": item_id}
+        upserted[field_label] = {"value": value,
+                                 "field_type": field_type, "item_id": item_id}
         return {"id": item_id}
 
     monkeypatch.setattr(exporter_module.OpExporter,
@@ -145,7 +146,7 @@ def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_pat
         "",       # download_attachments (accept)
         "",       # 1Password item title (accept default)
         "",       # 1Password vault (optional)
-        "prompt", # age_pass_source
+        "prompt",  # age_pass_source
         "y",      # Generate a new age keypair? -> yes
         "",       # age_recipients (accept default including generated pub)
         "n",      # include yubikey? -> no
@@ -161,7 +162,8 @@ def test_configure_interactive_generates_age_key_and_stores(monkeypatch, tmp_pat
     assert cfg["age"]["recipients"] == public_recipient
     # private key should have been stored via upsert
     assert "age_private_key" in upserted
-    assert upserted["age_private_key"]["value"].startswith("-----BEGIN AGE PRIVATE KEY-----")
+    assert upserted["age_private_key"]["value"].startswith(
+        "-----BEGIN AGE PRIVATE KEY-----")
     # passphrase should have been stored
     assert "passphrase" in upserted
     assert len(upserted["passphrase"]["value"]) > 0
@@ -204,7 +206,8 @@ def test_configure_interactive_parses_commented_public_and_secret_token(monkeypa
         return {"id": "fake-item", "fields": []}
 
     def fake_upsert(self, item_id, field_label, value, field_type="CONCEALED"):
-        upserted_all.append({"label": field_label, "value": value, "type": field_type})
+        upserted_all.append(
+            {"label": field_label, "value": value, "type": field_type})
         return {"id": item_id}
 
     monkeypatch.setattr(exporter_module.OpExporter,
@@ -259,7 +262,8 @@ def test_configure_interactive_parses_commented_public_and_secret_token(monkeypa
     assert pub_b in cfg2["age"]["recipients"]
     assert pub_a in cfg2["age"]["recipients"]
     # secret token stored via upsert
-    pk_entry_2 = [u for u in upserted_all if u["label"] == "age_private_key"][0]
+    pk_entry_2 = [u for u in upserted_all if u["label"]
+                  == "age_private_key"][0]
     assert secret_b in pk_entry_2["value"]
 
 
@@ -305,7 +309,7 @@ def test_default_private_key_title_includes_username(monkeypatch, tmp_path):
         "",       # download_attachments
         "",       # Accept default 1P item title
         "",       # vault (optional)
-        "prompt", # age_pass_source
+        "prompt",  # age_pass_source
         "y",      # Generate age keypair
         "",       # age_recipients (accept default)
         "n",      # yubikey? no
@@ -333,7 +337,8 @@ def test_configure_interactive_reuses_existing_secrets(monkeypatch, tmp_path):
     # no age-keygen call should happen
     def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
         if cmd[0] == "age-keygen":
-            raise AssertionError("age-keygen should not be called when reusing")
+            raise AssertionError(
+                "age-keygen should not be called when reusing")
         return 0, "{}", ""
 
     monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
