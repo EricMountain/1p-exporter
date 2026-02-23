@@ -79,16 +79,14 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
     assert "-o" in called["cmd"]
     assert out.suffix == ".age"
 
-    # verify markdown files were not written to disk under the output base
+    # no markdown or vault JSON should land on disk at all
     assert not any(tmp_path.rglob("*.md")), "markdown should not exist on disk when encrypting"
-    # vault json should also not be on disk
     assert not any(tmp_path.rglob("vault-*.json")), "vault JSON should not exist on disk when encrypting"
-    # manifest should still list .md and vault entries; working directory is tmp_work
+    # manifest (in tmp_work) should record entries
     outdir = tmp_work
     manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
     paths = [f.get("path", "") for f in manifest.get("files", [])]
     assert any(p.endswith(".md") for p in paths)
-    # vault entry included under vaults list
     vaults = manifest.get("vaults", [])
     assert any(v.get("file") == "vault-v1.json" for v in vaults)
 
@@ -101,7 +99,7 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
     assert not any(tmp_path.rglob("*.md")), "markdown should not exist on disk when encrypting"
 
 def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
-    # ensure minimal export with markdown and no encryption
+    # ensure minimal export with markdown and no encryption; no files should be left behind
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
     def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
         if cmd[:3] == ["op", "vault", "list"]:
@@ -115,9 +113,9 @@ def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
     out = exporter_module.run_backup(output_base=str(tmp_path), formats=("json", "md"), encrypt="none", quiet=True)
     # archive should be plain tarball compressed with gzip
     assert out.name.endswith(".tar.gz")
-    # there should be markdown files in the output directory
-    files = list(tmp_path.rglob("*.md"))
-    assert files, "markdown files should be written when not encrypting"
+    # no markdown or json files remain
+    assert not any(tmp_path.rglob("*.md")), "no markdown should be left"
+    assert not any(tmp_path.rglob("vault-*.json")), "no vault JSON should be left"
 
 
 def test_get_passphrase_from_keychain_keyring(monkeypatch):

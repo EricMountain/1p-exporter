@@ -242,16 +242,11 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                             {"path": str(dest.relative_to(outdir)), "sha256": sha256_file(dest)})
             items_full.append(item)
 
-        if encrypt == "none":
-            vault_filename = outdir / f"vault-{vault_id}.json"
-            write_json(vault_filename, items_full)
-            vault_sha = sha256_file(vault_filename)
-        else:
-            # create JSON bytes and keep in memory rather than disk
-            import json as _json, hashlib as _hashlib
-            vault_data = _json.dumps(items_full, indent=2, ensure_ascii=False).encode("utf-8")
-            vault_sha = _hashlib.sha256(vault_data).hexdigest()
-            memory_files.append((f"vault-{vault_id}.json", vault_data))
+        # always serialise vault JSON into memory; never write it to disk
+        import json as _json, hashlib as _hashlib
+        vault_data = _json.dumps(items_full, indent=2, ensure_ascii=False).encode("utf-8")
+        vault_sha = _hashlib.sha256(vault_data).hexdigest()
+        memory_files.append((f"vault-{vault_id}.json", vault_data))
         manifest["vaults"].append({
             "id": vault_id,
             "name": vault_name,
@@ -264,18 +259,11 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
             md_name = f"vault-{vault_id}.md"
             md_text = vault_to_md(vault_name, items_full)
             md_bytes = md_text.encode("utf-8")
-            # if encryption is disabled, write markdown to disk for easier access
-            if encrypt == "none":
-                md_path = outdir / md_name
-                md_path.write_text(md_text, encoding="utf-8")
-                manifest["files"].append(
-                    {"path": md_name, "sha256": sha256_file(md_path)})
-            else:
-                # keep in memory and compute hash
-                import hashlib
-                sha = hashlib.sha256(md_bytes).hexdigest()
-                manifest["files"].append({"path": md_name, "sha256": sha})
-                memory_files.append((md_name, md_bytes))
+            # always keep markdown in memory (no plaintext kept on disk)
+            import hashlib
+            sha = hashlib.sha256(md_bytes).hexdigest()
+            manifest["files"].append({"path": md_name, "sha256": sha})
+            memory_files.append((md_name, md_bytes))
 
     # write manifest
     manifest_path = outdir / "manifest.json"
@@ -316,6 +304,12 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     if encrypt == "none":
         with tarfile.open(archive_path, "w:gz") as tar:
             tar.add(outdir, arcname=ts)
+            # also add any in-memory files (markdown/vault JSON)
+            import io
+            for name, data in memory_files:
+                ti = tarfile.TarInfo(name=f"{ts}/{name}")
+                ti.size = len(data)
+                tar.addfile(ti, io.BytesIO(data))
         archive_sha = sha256_file(archive_path)
         if not quiet:
             print(f"Created archive: {archive_path} (sha256={archive_sha})")
