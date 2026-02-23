@@ -49,8 +49,22 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
             # don't suppress exceptions
             return False
 
-    # stub run_cmd so we never invoke the real op CLI (and avoid subprocess.run entirely)
-    monkeypatch.setattr(exporter_module, "run_cmd", lambda *args, **kwargs: (0, "[]", ""))
+    # stub run_cmd so that we have one vault/item and avoid executing real CLI
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "vault", "list"]:
+            return 0, '[{"id": "v1", "name": "Vault"}]', ""
+        if cmd[:3] == ["op", "item", "list"]:
+            return 0, '[{"id":"i1"}]', ""
+        if cmd[:3] == ["op", "item", "get"]:
+            return 0, '{"id":"i1","fields":[]}', ""
+        return 0, "", ""
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+    # intercept tempfile.mkdtemp so we know where the working directory is and keep
+    # it around for inspection.  also prevent cleanup by stubbing shutil.rmtree.
+    import tempfile, shutil
+    tmp_work = tmp_path / "workdir"
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(tmp_work))
+    monkeypatch.setattr(shutil, "rmtree", lambda p: None)
 
     # patch the global subprocess module so imports inside run_backup pick up our fake
     import subprocess as _sub
@@ -65,12 +79,39 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
     assert "-o" in called["cmd"]
     assert out.suffix == ".age"
 
+    # verify markdown files were not written to disk under the output base
+    assert not any(tmp_path.rglob("*.md")), "markdown should not exist on disk when encrypting"
+    # manifest should still list .md entry; working directory is tmp_work
+    outdir = tmp_work
+    manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+    assert any(f.get("path", "").endswith(".md") for f in manifest.get("files", []))
+
     # now test gpg streaming
     called["cmd"] = None
     out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="gpg", quiet=True)
     assert called["cmd"][0] == "gpg"
     assert "--output" in called["cmd"]
     assert out.suffix == ".gpg"
+    assert not any(tmp_path.rglob("*.md")), "markdown should not exist on disk when encrypting"
+
+def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
+    # ensure minimal export with markdown and no encryption
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "vault", "list"]:
+            return 0, '[{"id": "v1", "name": "Vault"}]', ""
+        if cmd[:3] == ["op", "item", "list"]:
+            return 0, '[{"id":"i1"}]', ""
+        if cmd[:3] == ["op", "item", "get"]:
+            return 0, '{"id":"i1","fields":[]}', ""
+        return 0, "", ""
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+    out = exporter_module.run_backup(output_base=str(tmp_path), formats=("json", "md"), encrypt="none", quiet=True)
+    # archive should be plain tarball compressed with gzip
+    assert out.name.endswith(".tar.gz")
+    # there should be markdown files in the output directory
+    files = list(tmp_path.rglob("*.md"))
+    assert files, "markdown files should be written when not encrypting"
 
 
 def test_get_passphrase_from_keychain_keyring(monkeypatch):

@@ -174,8 +174,18 @@ class OpExporter:
 def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    outdir = output_base / ts
-    outdir.mkdir(parents=True, exist_ok=True)
+
+    # when encrypting we don't want persistent plaintext files left behind,
+    # so create a temporary work directory that will be removed after the
+    # archive is built.  If no encryption is requested we keep the timestamped
+    # directory under output_base so users can examine files.
+    if encrypt != "none":
+        import tempfile, shutil
+        work_dir = Path(tempfile.mkdtemp())
+    else:
+        work_dir = output_base / ts
+        work_dir.mkdir(parents=True, exist_ok=True)
+    outdir = work_dir
 
     exporter = OpExporter()
 
@@ -185,6 +195,10 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
         "vaults": [],
         "files": [],
     }
+
+    # list of (relative_name, bytes) for files we generate in memory
+    # and later inject into the tar instead of writing to disk
+    memory_files: list[tuple[str, bytes]] = []
 
     attachments_dir = outdir / "attachments"
     if download_attachments:
@@ -234,11 +248,21 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
             items_full), "file": str(vault_filename.name), "sha256": sha256_file(vault_filename)})
 
         if "md" in formats:
-            md_path = outdir / f"vault-{vault_id}.md"
+            md_name = f"vault-{vault_id}.md"
             md_text = vault_to_md(vault_name, items_full)
-            md_path.write_text(md_text, encoding="utf-8")
-            manifest["files"].append(
-                {"path": str(md_path.name), "sha256": sha256_file(md_path)})
+            md_bytes = md_text.encode("utf-8")
+            # if encryption is disabled, write markdown to disk for easier access
+            if encrypt == "none":
+                md_path = outdir / md_name
+                md_path.write_text(md_text, encoding="utf-8")
+                manifest["files"].append(
+                    {"path": md_name, "sha256": sha256_file(md_path)})
+            else:
+                # keep in memory and compute hash
+                import hashlib
+                sha = hashlib.sha256(md_bytes).hexdigest()
+                manifest["files"].append({"path": md_name, "sha256": sha})
+                memory_files.append((md_name, md_bytes))
 
     # write manifest
     manifest_path = outdir / "manifest.json"
@@ -416,17 +440,30 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
         raise RuntimeError(f"unsupported encrypt mode: {encrypt}")
 
     # now stream the tarball through the encryptor subprocess
-    import subprocess
+    import subprocess, io, shutil
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     writer = _HashingWriter(proc.stdin)
     with tarfile.open(fileobj=writer, mode="w|gz") as tar:
+        # add the on-disk directory first
         tar.add(outdir, arcname=ts)
+        # inject any in-memory files (e.g. markdown when encrypting)
+        for name, data in memory_files:
+            # ensure stored with correct relative path under timestamp
+            ti = tarfile.TarInfo(name=f"{ts}/{name}")
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
     writer.flush()
     proc.stdin.close()
     rc = proc.wait()
     if rc != 0:
         raise CommandError(cmd=cmd, rc=rc, stderr="encryption failed")
     archive_sha = writer.hasher.hexdigest()
+    # clean up temporary directory when encryption was used
+    if encrypt != "none":
+        try:
+            shutil.rmtree(outdir)
+        except Exception:
+            pass
     if not quiet:
         # show sha of plaintext archive even though it was never written to disk
         print(f"Streamed archive -> {out_enc} (sha256={archive_sha})")
