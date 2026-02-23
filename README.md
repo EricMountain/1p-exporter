@@ -117,3 +117,18 @@ You can still run the package without direnv using `PYTHONPATH=src .venv/bin/pyt
 - 1Password CLI: [1Password CLI docs](https://developer.1password.com/docs/cli/)
 - age: [age encryption](https://age-encryption.org/)
 - sops: [mozilla/sops](https://github.com/mozilla/sops)
+
+## Setup
+
+### MacOS
+
+- Ensure `op` is installed
+  - `brew install 1password-cli`
+- [Setup](https://developer.1password.com/docs/cli/app-integration/#set-up-the-app-integration) the `op` to `1Password` integration
+- Run `op account add`: should report 1Password CLI is connected with the 1Password app.
+- Run `op signin`: should be prompted to authorise 1Password access.
+- `python -m onep_exporter doctor`
+  - Need `age` and `op` installed. It's OK if the `config` is missing at this point.
+- `python -m onep_exporter init`
+  - Accept all defaults
+  - `doctor` run at the end should be all green
