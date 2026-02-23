@@ -81,10 +81,16 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
 
     # verify markdown files were not written to disk under the output base
     assert not any(tmp_path.rglob("*.md")), "markdown should not exist on disk when encrypting"
-    # manifest should still list .md entry; working directory is tmp_work
+    # vault json should also not be on disk
+    assert not any(tmp_path.rglob("vault-*.json")), "vault JSON should not exist on disk when encrypting"
+    # manifest should still list .md and vault entries; working directory is tmp_work
     outdir = tmp_work
     manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
-    assert any(f.get("path", "").endswith(".md") for f in manifest.get("files", []))
+    paths = [f.get("path", "") for f in manifest.get("files", [])]
+    assert any(p.endswith(".md") for p in paths)
+    # vault entry included under vaults list
+    vaults = manifest.get("vaults", [])
+    assert any(v.get("file") == "vault-v1.json" for v in vaults)
 
     # now test gpg streaming
     called["cmd"] = None

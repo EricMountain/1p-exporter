@@ -242,10 +242,23 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                             {"path": str(dest.relative_to(outdir)), "sha256": sha256_file(dest)})
             items_full.append(item)
 
-        vault_filename = outdir / f"vault-{vault_id}.json"
-        write_json(vault_filename, items_full)
-        manifest["vaults"].append({"id": vault_id, "name": vault_name, "items": len(
-            items_full), "file": str(vault_filename.name), "sha256": sha256_file(vault_filename)})
+        if encrypt == "none":
+            vault_filename = outdir / f"vault-{vault_id}.json"
+            write_json(vault_filename, items_full)
+            vault_sha = sha256_file(vault_filename)
+        else:
+            # create JSON bytes and keep in memory rather than disk
+            import json as _json, hashlib as _hashlib
+            vault_data = _json.dumps(items_full, indent=2, ensure_ascii=False).encode("utf-8")
+            vault_sha = _hashlib.sha256(vault_data).hexdigest()
+            memory_files.append((f"vault-{vault_id}.json", vault_data))
+        manifest["vaults"].append({
+            "id": vault_id,
+            "name": vault_name,
+            "items": len(items_full),
+            "file": f"vault-{vault_id}.json",
+            "sha256": vault_sha,
+        })
 
         if "md" in formats:
             md_name = f"vault-{vault_id}.md"
