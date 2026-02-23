@@ -23,6 +23,70 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
     # make ensure_tool return True for any tool we might invoke
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
 
+    # interception helpers for workdir and subprocess
+    import io, subprocess
+    called = {"cmd": None}
+
+    class FakePopen:
+        def __init__(self, cmd, stdin=None, **kwargs):
+            called["cmd"] = cmd
+            self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
+            self.returncode = 0
+        def communicate(self, input=None, timeout=None):
+            return (b"", b"")
+        def wait(self):
+            return self.returncode
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    import subprocess as _sub
+    monkeypatch.setattr(_sub, "Popen", FakePopen)
+
+    # stub tempfile and shutil
+    import tempfile, shutil
+    tmp_work = tmp_path / "workdir"
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda: str(tmp_work))
+    monkeypatch.setattr(shutil, "rmtree", lambda p: None)
+
+    # our fake run_cmd should supply vault, item and attachment metadata
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "vault", "list"]:
+            return 0, '[{"id": "v1", "name": "Vault"}]', ""
+        if cmd[:3] == ["op", "item", "list"]:
+            return 0, '[{"id":"i1"}]', ""
+        if cmd[:3] == ["op", "item", "get"]:
+            return 0, '{"id":"i1","fields":[],"files":[{"id":"a1","name":"file.txt"}]}', ""
+        if cmd[:3] == ["op", "document", "get"]:
+            # return dummy bytes for attachment
+            return 0, "contents", ""
+        return 0, "", ""
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    # ensure prompt returns a passphrase
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "pw123")
+
+    # test age encryption streaming with attachments
+    out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="age", age_pass_source="prompt", age_recipients="", quiet=True)
+    assert called["cmd"][0] == "age"
+    assert out.suffix == ".age"
+    # attachments and vault JSON should have been streamed only
+    assert not any(tmp_path.rglob("attachments/*"))
+    assert not any(tmp_path.rglob("vault-*.json"))
+    outdir = tmp_work
+    manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+    assert any(v.get("file") == "vault-v1.json" for v in manifest.get("vaults", []))
+    assert any(f.get("path") == "attachments/a1-file.txt" for f in manifest.get("files", []))
+
+    # now test gpg streaming (no need to re-assert manifest again)
+    called["cmd"] = None
+    out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="gpg", quiet=True)
+    assert called["cmd"][0] == "gpg"
+    assert out.suffix == ".gpg"
+    # make ensure_tool return True for any tool we might invoke
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
     # capture subprocess.Popen invocations rather than run_cmd
     import io, subprocess
     called = {"cmd": None}
@@ -102,12 +166,23 @@ def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
     # ensure minimal export with markdown and no encryption; no files should be left behind
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
     def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        from pathlib import Path
         if cmd[:3] == ["op", "vault", "list"]:
             return 0, '[{"id": "v1", "name": "Vault"}]', ""
         if cmd[:3] == ["op", "item", "list"]:
             return 0, '[{"id":"i1"}]', ""
         if cmd[:3] == ["op", "item", "get"]:
-            return 0, '{"id":"i1","fields":[]}', ""
+            # include a dummy attachment entry
+            return 0, '{"id":"i1","fields":[],"files":[{"id":"a1","name":"file.txt"}]}', ""
+        if cmd[:3] == ["op", "document", "get"]:
+            outpath = cmd[-1]
+            try:
+                Path(outpath).parent.mkdir(parents=True, exist_ok=True)
+                with open(outpath, "wb") as f:
+                    f.write(b"dummy")
+            except Exception:
+                pass
+            return 0, "", ""
         return 0, "", ""
     monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
     out = exporter_module.run_backup(output_base=str(tmp_path), formats=("json", "md"), encrypt="none", quiet=True)
@@ -116,6 +191,10 @@ def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
     # no markdown or json files remain
     assert not any(tmp_path.rglob("*.md")), "no markdown should be left"
     assert not any(tmp_path.rglob("vault-*.json")), "no vault JSON should be left"
+    # attachments should also be gone when encrypt=none? actually in this test
+    # we expect attachments to have been written to disk because encryption=nothing
+    files = list(tmp_path.rglob("attachments/*"))
+    assert files, "attachments should exist when not encrypting"
 
 
 def test_get_passphrase_from_keychain_keyring(monkeypatch):

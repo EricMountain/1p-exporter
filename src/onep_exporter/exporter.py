@@ -35,6 +35,19 @@ class OpExporter:
         except CommandError as e:
             raise RuntimeError(f"failed to download document {doc_id}: {e}")
 
+    def download_document_bytes(self, doc_id: str) -> bytes:
+        """Download a document and return its raw bytes.
+
+        This is used when we're encrypting and do not want to write the
+        attachment to disk.  We run `op document get <id>` without the
+        --output flag and capture stdout.
+        """
+        try:
+            rc, out, err = run_cmd(["op", "document", "get", doc_id], capture_output=True)
+        except CommandError as e:
+            raise RuntimeError(f"failed to download document {doc_id}: {e}")
+        return out.encode("utf-8") if isinstance(out, str) else out
+
     def get_item_field_value(self, item_ref: str, field_name: Optional[str] = None) -> Optional[str]:
         """Return a field value from a 1Password item JSON (best-effort).
 
@@ -231,15 +244,29 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                 fid = fmeta.get("id") or fmeta.get("file_id")
                 name = fmeta.get("name") or fmeta.get("filename")
                 if fid and name and download_attachments:
-                    dest = attachments_dir / f"{fid}-{name}"
-                    try:
-                        exporter.download_document(fid, dest)
-                    except Exception as e:
-                        print(
-                            f"    warning: could not download attachment {name}: {e}")
+                    if encrypt == "none":
+                        dest = attachments_dir / f"{fid}-{name}"
+                        try:
+                            exporter.download_document(fid, dest)
+                        except Exception as e:
+                            print(
+                                f"    warning: could not download attachment {name}: {e}")
+                        else:
+                            manifest["files"].append(
+                                {"path": str(dest.relative_to(outdir)), "sha256": sha256_file(dest)})
                     else:
-                        manifest["files"].append(
-                            {"path": str(dest.relative_to(outdir)), "sha256": sha256_file(dest)})
+                        # fetch bytes directly and keep in memory
+                        try:
+                            data = exporter.download_document_bytes(fid)
+                        except Exception as e:
+                            print(
+                                f"    warning: could not download attachment {name}: {e}")
+                            continue
+                        import hashlib
+                        sha = hashlib.sha256(data).hexdigest()
+                        relpath = f"attachments/{fid}-{name}"
+                        manifest["files"].append({"path": relpath, "sha256": sha})
+                        memory_files.append((relpath, data))
             items_full.append(item)
 
         # always serialise vault JSON into memory; never write it to disk
