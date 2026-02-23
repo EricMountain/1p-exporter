@@ -7,3 +7,5 @@ build/
 backups/
 .env
 .venv/
+.vscode/
+
