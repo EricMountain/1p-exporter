@@ -247,20 +247,48 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     manifest["manifest_sha256"] = manifest_hash
     write_json(manifest_path, manifest)  # update with hash
 
-    # create archive
+    # helper class used when streaming tar output through an encryptor
+    class _HashingWriter:
+        def __init__(self, sink):
+            # sink should be a writable file-like object (e.g. subprocess.stdin)
+            self.sink = sink
+            import hashlib
+            self.hasher = hashlib.sha256()
+
+        def write(self, data: bytes) -> int:
+            # update hash then forward to underlying sink
+            self.hasher.update(data)
+            return self.sink.write(data)
+
+        def flush(self):
+            try:
+                return self.sink.flush()
+            except Exception:
+                pass
+
+        def close(self):
+            try:
+                return self.sink.close()
+            except Exception:
+                pass
+
+    # create archive path (used for naming even if we stream)
     archive_path = output_base / f"1p-backup-{ts}.tar.gz"
-    with tarfile.open(archive_path, "w:gz") as tar:
-        tar.add(outdir, arcname=ts)
 
-    archive_sha = sha256_file(archive_path)
-    if not quiet:
-        print(f"Created archive: {archive_path} (sha256={archive_sha})")
+    # write either to disk or stream directly into encryption tool
+    if encrypt == "none":
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(outdir, arcname=ts)
+        archive_sha = sha256_file(archive_path)
+        if not quiet:
+            print(f"Created archive: {archive_path} (sha256={archive_sha})")
+        return archive_path
 
-    # optional encryption (GPG symmetric)
+    # At this point we know encryption is requested.
+    # compute passphrase/recipients for the requested backend as before
     if encrypt == "gpg":
         if not ensure_tool("gpg"):
             raise RuntimeError("gpg not found for encryption")
-        # read passphrase from env or prompt
         import os
         import getpass
 
@@ -269,17 +297,11 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
             passphrase = getpass.getpass(
                 "GPG passphrase for symmetric encryption: ")
         out_enc = str(archive_path) + ".gpg"
-        # Use --batch and passphrase via stdin
-        proc = run_cmd(["gpg", "--symmetric", "--cipher-algo", "AES256", "--batch", "--passphrase-fd",
-                       "0", "--output", out_enc, str(archive_path)], input=passphrase.encode())
-        # remove plaintext archive by default
-        archive_path.unlink()
-        if not quiet:
-            print(f"Encrypted archive -> {out_enc}")
-        return Path(out_enc)
-
-    # optional encryption using age (supports passphrase + recipients)
-    if encrypt == "age":
+        # build command using loopback pinentry so we can pass passphrase as arg
+        cmd = ["gpg", "--symmetric", "--cipher-algo", "AES256", "--batch",
+               "--pinentry-mode", "loopback", "--passphrase", passphrase,
+               "--output", out_enc]
+    elif encrypt == "age":
         if not ensure_tool("age"):
             raise RuntimeError("age not found for encryption")
         import os
@@ -389,16 +411,26 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
         if passphrase:
             # include passphrase recipient; age supports --passphrase
             cmd.append("--passphrase")
+    else:
+        # This branch should not be reachable because we handled 'none' earlier
+        raise RuntimeError(f"unsupported encrypt mode: {encrypt}")
 
-        # run age: supply passphrase on stdin if present
-        input_bytes = passphrase.encode() if passphrase else None
-        run_cmd(cmd + [str(archive_path)], input=input_bytes)
-        archive_path.unlink()
-        if not quiet:
-            print(f"Encrypted archive -> {out_enc}")
-        return Path(out_enc)
-
-    return archive_path
+    # now stream the tarball through the encryptor subprocess
+    import subprocess
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    writer = _HashingWriter(proc.stdin)
+    with tarfile.open(fileobj=writer, mode="w|gz") as tar:
+        tar.add(outdir, arcname=ts)
+    writer.flush()
+    proc.stdin.close()
+    rc = proc.wait()
+    if rc != 0:
+        raise CommandError(cmd=cmd, rc=rc, stderr="encryption failed")
+    archive_sha = writer.hasher.hexdigest()
+    if not quiet:
+        # show sha of plaintext archive even though it was never written to disk
+        print(f"Streamed archive -> {out_enc} (sha256={archive_sha})")
+    return Path(out_enc)
 
 
 def _get_passphrase_from_keychain(service: str, username: str) -> Optional[str]:
