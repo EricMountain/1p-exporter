@@ -49,24 +49,35 @@ class OpExporter:
         return out.encode("utf-8") if isinstance(out, str) else out
 
     def get_item_field_value(self, item_ref: str, field_name: Optional[str] = None) -> Optional[str]:
-        """Return a field value from a 1Password item JSON (best-effort).
+        """Return a field value from a 1Password item JSON.
 
-        item_ref may be an item id or title (passed to `op item get`).
-        If field_name is provided the field with matching `name` or `label` is returned.
-        Otherwise the first password-like field is returned.
+        *item_ref* may be an item id or title (passed to ``op item get``).
+        When *field_name* is supplied we look **only** for a field whose
+        `name` or `label` exactly matches that value; if no such field exists the
+        result is ``None``.  This preserves the caller's explicit intent and
+        avoids ambiguous heuristics.
+
+        When *field_name* is ``None`` we fall back to a simple heuristic that
+        returns the first field whose type is ``password`` or whose name/label
+        contains the substring ``pass``.  This allows callers to omit a field
+        name while still finding either a "password" or "passphrase" entry.
         """
         item = self.get_item(item_ref)
         fields = item.get("fields") or []
-        # prefer an explicit field name
+        # explicit lookup; do not fall back if the name isn't found
         if field_name:
             for f in fields:
                 if (f.get("name") == field_name) or (f.get("label") == field_name):
                     val = f.get("value")
                     if isinstance(val, str):
                         return val
-        # fallback: first password-like field
+            return None
+        # no explicit name supplied; use heuristic
         for f in fields:
-            if f.get("type") == "password" or "password" in (f.get("name") or "").lower() or "password" in (f.get("label") or "").lower():
+            # treat any field whose type is `password` or whose name/label
+            # contains the substring "pass" as a candidate.  this catches both
+            # "password" and "passphrase" (and other reasonable variants).
+            if f.get("type") == "password" or "pass" in (f.get("name") or "").lower() or "pass" in (f.get("label") or "").lower():
                 val = f.get("value")
                 if isinstance(val, str):
                     return val
@@ -184,7 +195,7 @@ class OpExporter:
         return token
 
 
-def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "password", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
+def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "passphrase", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -441,7 +452,11 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                 age_pass_item, age_pass_field)
             if not passphrase:
                 raise RuntimeError(
-                    "could not extract passphrase from the specified 1Password item/field")
+                    f"could not extract passphrase from the specified 1Password item/field "
+                    f"('{age_pass_item}', '{age_pass_field}'). "
+                    "ensure the item exists, the field name is correct, and that it "
+                    "contains a non-empty string"
+                )
         elif age_pass_source == "keychain":
             # read from macOS Keychain (keyring if available, else `security`)
             passphrase = None
@@ -622,7 +637,7 @@ def _generate_age_keypair_and_store(exporter: 'OpExporter', item_id: str) -> Opt
     return pub
 
 
-def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, store_in_1password: Optional[str] = None, onepassword_vault: Optional[str] = None, store_in_keychain: bool = False, keychain_service: str = "1p-exporter", keychain_username: str = "backup", onepassword_field: str = "password") -> str:
+def init_setup(*, passphrase: Optional[str] = None, generate: bool = False, store_in_1password: Optional[str] = None, onepassword_vault: Optional[str] = None, store_in_keychain: bool = False, keychain_service: str = "1p-exporter", keychain_username: str = "backup", onepassword_field: str = "passphrase") -> str:
     """Create or store an age passphrase according to provided options.
 
     Returns the plaintext passphrase (also stores it as requested).

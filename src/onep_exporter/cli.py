@@ -28,7 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--age-pass-item", default=argparse.SUPPRESS,
                    help="1Password item title or id that contains the passphrase (used when --age-pass-source=1password)")
     b.add_argument("--age-pass-field", default=argparse.SUPPRESS,
-                   help="field name inside the 1Password item to use for the passphrase (default: 'password')")
+                   help="field name inside the 1Password item to use for the passphrase (default: 'passphrase'). "
+                        "if supplied but not found, the backup will fail instead of guessing")
     # keychain-related flags are macOS-specific — hide them from help on other platforms
     keychain_help = "macOS keychain service name (when using --age-pass-source keychain)" if is_macos else argparse.SUPPRESS
     b.add_argument("--age-keychain-service", default=argparse.SUPPRESS,
@@ -66,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     keychain_user_help = "keychain account/username" if sys.platform == "darwin" else argparse.SUPPRESS
     i.add_argument("--keychain-username", default="backup",
                    help=keychain_user_help)
-    i.add_argument("--onepassword-field", default="password",
-                   help="field name to use when storing in 1Password")
+    i.add_argument("--onepassword-field", default="passphrase",
+                   help="field name to use when storing in 1Password (default: passphrase)")
     i.add_argument("--onepassword-vault",
                    help="1Password vault name or id to store the passphrase in (optional)")
     i.add_argument("--signin", action="store_true",
@@ -124,7 +125,7 @@ def main(argv=None):
         age_pass_item = args.age_pass_item if hasattr(
             args, "age_pass_item") else age_cfg.get("pass_item")
         age_pass_field = args.age_pass_field if hasattr(
-            args, "age_pass_field") else age_cfg.get("pass_field", "password")
+            args, "age_pass_field") else age_cfg.get("pass_field", "passphrase")
         age_recipients = args.age_recipients if hasattr(
             args, "age_recipients") else age_cfg.get("recipients", "")
         age_use_yubikey = args.age_use_yubikey if hasattr(

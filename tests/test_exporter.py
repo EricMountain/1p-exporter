@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import onep_exporter.exporter as exporter_module
 
 
@@ -17,6 +18,37 @@ def test_get_item_field_value(monkeypatch):
     op = exporter_module.OpExporter()
     val = op.get_item_field_value("My Item", "password")
     assert val == "seekrit"
+
+
+def test_get_item_field_value_heuristic_when_no_field_provided(monkeypatch):
+    # if no field name is supplied we fall back to a simple heuristic that
+    # matches either "password" or "passphrase" labels.
+    sample_item = {"fields": [
+        {"id": "f1", "type": "text", "label": "passphrase", "value": "secret"}]}
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "item", "get"]:
+            return 0, json.dumps(sample_item), ""
+        raise RuntimeError("unexpected command: %r" % (cmd,))
+
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+    op = exporter_module.OpExporter()
+    assert op.get_item_field_value("My Item") == "secret"
+
+
+def test_get_item_field_value_explicit_missing_returns_none(monkeypatch):
+    # specifying a name should not trigger heuristics; missing field yields None
+    sample_item = {"fields": [
+        {"id": "f1", "type": "text", "label": "passphrase", "value": "secret"}]}
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        if cmd[:3] == ["op", "item", "get"]:
+            return 0, json.dumps(sample_item), ""
+        raise RuntimeError("unexpected command: %r" % (cmd,))
+
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+    op = exporter_module.OpExporter()
+    assert op.get_item_field_value("My Item", "password") is None
 
 
 def test_streaming_encrypt_path(monkeypatch, tmp_path):
@@ -347,6 +379,28 @@ def test_passphrase_mismatch_raises(monkeypatch, tmp_path):
     else:
         raise AssertionError(
             "expected RuntimeError due to passphrase mismatch")
+
+
+
+
+def test_age_passphrase_not_found_reports_item_and_field(monkeypatch, tmp_path):
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    # always fail to return a passphrase
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "get_item_field_value", lambda self, item, field=None: None)
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None: (
+        (0, "[]", "") if cmd[:3] == ["op", "vault", "list"] else (0, "", "")))
+
+    with pytest.raises(RuntimeError) as exc:
+        exporter_module.run_backup(output_base=str(tmp_path), encrypt="age",
+                                   age_pass_source="1password",
+                                   age_pass_item="Item",
+                                   age_pass_field="password",
+                                   quiet=True)
+    msg = str(exc.value)
+    assert "could not extract passphrase" in msg
+    assert "Item" in msg
+    assert "password" in msg
 
 
 def test_sync_passphrase_from_1password_to_keychain(monkeypatch, tmp_path):

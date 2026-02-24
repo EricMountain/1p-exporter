@@ -66,12 +66,17 @@ Verify the backup:
 Examples:
 
 ```bash
-# age passphrase from a 1Password item
+# age passphrase from a 1Password item (field defaults to "passphrase")
 1p-exporter backup --encrypt age --age-pass-source 1password --age-pass-item "Backup Passphrase"
 
 # age passphrase from macOS Keychain (Touch ID may prompt)
 1p-exporter backup --encrypt age --age-pass-source keychain
 ```
+
+By default the tool looks for a field named **passphrase** in the referenced
+1Password item.  You can override it with the `--age-pass-field` CLI option or
+`age.pass_field` in the config; if you specify a name and the field is not
+found the backup will abort rather than guessing a value from another field.
 
 ## Configuration
 
