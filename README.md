@@ -73,10 +73,6 @@ Examples:
 1p-exporter backup --encrypt age --age-pass-source keychain
 ```
 
-> **Note:** older versions accidentally created fields whose names included
-> the literal string ``[type`` (e.g. ``passphrase[type``) when the item was
-> initialised.  This has been fixed; new config/`init` runs add normal fields.
-
 By default the tool looks for a field named **passphrase** in the referenced
 1Password item.  You can override it with the `--age-pass-field` CLI option or
 `age.pass_field` in the config; if you specify a name and the field is not
