@@ -874,6 +874,66 @@ def configure_interactive() -> dict:
     return new_cfg
 
 
+def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
+    """Return item titles matching *pattern* in exported JSON under *path*.
+
+    *path* may be a directory containing per-vault JSON exports (as produced by
+    :func:`run_backup`) or a tar archive created by a backup.  The function
+    searches for ``*.json`` files (skipping ``manifest.json``) and extracts a
+    list of titles from any list-valued JSON, filtering with the provided
+    regular expression.  A ``re.compile`` error will propagate to the caller.
+    """
+    import re
+    import json
+    import tarfile
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"path not found: {p}")
+
+    regex = re.compile(pattern)
+    matches: List[str] = []
+
+    # support scanning a tar/tar.gz/age archive directly
+    if p.is_file() and (p.suffix in (".tar", ".tgz", ".gz", ".age") or p.name.endswith(".tar.gz") or p.name.endswith(".tar.age")):
+        try:
+            with tarfile.open(p, "r:*") as tf:
+                for member in tf.getmembers():
+                    name = member.name
+                    if not name.endswith(".json") or name.endswith("manifest.json"):
+                        continue
+                    fobj = tf.extractfile(member)
+                    if not fobj:
+                        continue
+                    try:
+                        data = json.load(fobj)
+                    except Exception:
+                        continue
+                    if isinstance(data, list):
+                        for item in data:
+                            title = item.get("title")
+                            if title and regex.search(title):
+                                matches.append(title)
+        except Exception as e:
+            raise RuntimeError(f"failed to read archive {p}: {e}")
+        return matches
+
+    # otherwise treat path as a directory tree
+    for f in p.rglob("*.json"):
+        if f.name == "manifest.json":
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            for item in data:
+                title = item.get("title")
+                if title and regex.search(title):
+                    matches.append(title)
+    return matches
+
+
 def verify_manifest(manifest_path: str) -> bool:
     p = Path(manifest_path)
     if not p.exists():

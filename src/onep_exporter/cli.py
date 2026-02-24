@@ -79,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser(
         "doctor", help="Sanity-check environment and configuration")
 
+    # 'query' command for post-processing exported data
+    q = sub.add_parser("query", help="Query exported backup data")
+    qsub = q.add_subparsers(dest="query_cmd")
+
+    ql = qsub.add_parser("list", help="List item titles matching a regexp")
+    ql.add_argument("pattern", help="regular expression to match item titles")
+    ql.add_argument("--dir", "-d", default=".",
+                    help="path to directory containing exported JSON (default: current directory)")
+
     return p
 
 
@@ -171,5 +180,25 @@ def main(argv=None):
     elif args.cmd == "doctor":
         ok = doctor()
         sys.exit(0 if ok else 2)
+    elif args.cmd == "query":
+        # only subcommand supported so far is ``list``
+        if args.query_cmd == "list":
+            # perform the search and print matching titles
+            from .exporter import query_list_titles
+
+            try:
+                # first argument is path (from --dir), second is regexp pattern
+                matches = query_list_titles(args.dir, args.pattern)
+            except Exception as e:
+                print(f"error: {e}")
+                sys.exit(1)
+
+            for t in matches:
+                print(t)
+            # exit code 0 even if no matches; you can pipe into ``wc -l`` etc
+            sys.exit(0)
+        else:
+            q.print_help()
+            sys.exit(2)
     else:
         parser.print_help()

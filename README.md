@@ -94,6 +94,15 @@ See `examples/config.example.json` for a ready-to-copy sample configuration.
 - `1p-exporter init` — interactive setup and optional passphrase storage
 - `1p-exporter backup [--encrypt age|gpg|none]` — run export (CLI overrides config)
 - `1p-exporter verify <manifest.json>` — verify manifest integrity
+- `1p-exporter query list <regexp> [--dir DIR]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory)
+
+### Query examples
+
+```bash
+# find every exported item whose title contains "github"
+1p-exporter query list github --dir ~/onep-backups/20250101T120000Z
+```
+- `1p-exporter query list <regexp> [--dir DIR]` — search exported JSON files for item titles matching a regular expression
 
 ## Development & tests
 
