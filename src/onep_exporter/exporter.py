@@ -64,13 +64,25 @@ class OpExporter:
         """
         item = self.get_item(item_ref)
         fields = item.get("fields") or []
-        # explicit lookup; do not fall back if the name isn't found
+        # explicit lookup; if a name is given we only look for that field
         if field_name:
             for f in fields:
                 if (f.get("name") == field_name) or (f.get("label") == field_name):
                     val = f.get("value")
                     if isinstance(val, str):
                         return val
+            # explicit name supplied but not found -> return None
+            return None
+
+        # no explicit field name supplied; use heuristic fallback
+        for f in fields:
+            # treat any field whose type is `password` or whose name/label
+            # contains the substring "pass" as a candidate.  this catches both
+            # "password" and "passphrase" (and other reasonable variants).
+            if f.get("type") == "password" or "pass" in (f.get("name") or "").lower() or "pass" in (f.get("label") or "").lower():
+                val = f.get("value")
+                if isinstance(val, str):
+                    return val
 
         # no match
         return None
@@ -161,14 +173,42 @@ class OpExporter:
                           field_type: str = "CONCEALED") -> dict:
         """Add or update a field on an existing 1Password item.
 
-        Uses ``op item edit`` with assignment syntax.
-        field_type should be 'CONCEALED' or 'TEXT'.
-        Returns the updated item JSON.
+        The previous implementation used the ``<label>[type=...]=<value>``
+        assignment syntax, which could confuse the CLI and result in a field
+        whose name included ``[type``.  Instead we now retrieve the current
+        item JSON, mutate the fields list, and resubmit the full object via
+        ``op item edit --format json -``.  This mirrors the behaviour of
+        :meth:`store_passphrase_in_1password` and avoids any parsing edge cases.
+
+        ``field_type`` should be either ``CONCEALED`` or ``TEXT``.  Returns
+        the updated item JSON as parsed from the CLI output.
         """
-        type_str = "concealed" if field_type == "CONCEALED" else "text"
-        assignment = f"{field_label}[type={type_str}]={value}"
-        cmd = ["op", "item", "edit", item_id, assignment, "--format", "json"]
-        _, out, _ = run_cmd(cmd)
+        # fetch existing item so we can modify its fields list
+        item = self.get_item(item_id)
+        fields = item.get("fields") or []
+
+        # look for an existing field with matching name/label
+        updated = False
+        for f in fields:
+            if (f.get("name") == field_label) or (f.get("label") == field_label):
+                f["value"] = value
+                f["type"] = field_type
+                updated = True
+                break
+        if not updated:
+            # add new field; use field_label for both id and label so the
+            # field can be re-identified later
+            fields.append({
+                "id": field_label,
+                "label": field_label,
+                "type": field_type,
+                "value": value,
+            })
+        item["fields"] = fields
+
+        # send modified item JSON back to op via stdin
+        cmd = ["op", "item", "edit", "--format", "json", item_id, "-"]
+        _, out, _ = run_cmd(cmd, input=json.dumps(item).encode())
         return json.loads(out)
 
     def signin_interactive(self, account: Optional[str] = None) -> str:

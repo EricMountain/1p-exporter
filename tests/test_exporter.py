@@ -332,6 +332,46 @@ def test_store_passphrase_pipes_json_via_stdin(monkeypatch):
     assert field["label"] == "password"
 
 
+def test_upsert_item_field_adds_and_updates(monkeypatch):
+    """Ensure upsert_item_field sends a full JSON object and doesn't leak
+    the `[type` syntax into field names."""
+    seen = {}
+
+    # simulate an existing item with one field
+    original = {"id": "i1", "title": "X", "fields": [
+        {"id": "foo", "label": "foo", "type": "TEXT", "value": "old"}
+    ]}
+
+    def fake_get_item(self, item_id):
+        return original.copy()
+
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+        seen["cmd"] = cmd
+        seen["input"] = input
+        # echo back the JSON we received as the updated item
+        return 0, input.decode() if isinstance(input, bytes) else input, ""
+
+    monkeypatch.setattr(exporter_module.OpExporter, "get_item", fake_get_item)
+    monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
+
+    op = exporter_module.OpExporter()
+    # update existing field
+    res = op.upsert_item_field("i1", "foo", "new", field_type="TEXT")
+    assert isinstance(res, dict)
+    # check that the command used JSON mode and reads from stdin
+    assert "--format" in seen["cmd"]
+    assert "json" in seen["cmd"]
+    assert seen["cmd"][-1] == "-"
+    payload = json.loads(seen["input"])
+    assert payload["fields"][0]["value"] == "new"
+
+    # add new concealed field
+    seen.clear()
+    res2 = op.upsert_item_field("i1", "bar", "val", field_type="CONCEALED")
+    payload2 = json.loads(seen["input"])
+    assert any(f["label"] == "bar" and f["type"] == "CONCEALED" for f in payload2["fields"])
+
+
 def test_store_private_key_uses_concealed_field(monkeypatch):
     """Private keys are also stored as CONCEALED fields (same as passphrases)."""
     seen = {}
