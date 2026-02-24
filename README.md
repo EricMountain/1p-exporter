@@ -76,7 +76,7 @@ Examples:
 By default the tool looks for a field named **passphrase** in the referenced
 1Password item.  You can override it with the `--age-pass-field` CLI option or
 `age.pass_field` in the config; if you specify a name and the field is not
-found the backup will abort rather than guessing a value from another field.
+found or no field name is provided, the backup will abort.
 
 ## Configuration
 
@@ -107,6 +107,7 @@ See `examples/config.example.json` for a ready-to-copy sample configuration.
 # find every exported item whose title contains "github"
 1p-exporter query list github --dir ~/onep-backups/20250101T120000Z
 ```
+
 - `1p-exporter query list <regexp> [--dir DIR]` — search exported JSON files for item titles matching a regular expression
 
 ## Development & tests

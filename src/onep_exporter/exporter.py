@@ -71,16 +71,7 @@ class OpExporter:
                     val = f.get("value")
                     if isinstance(val, str):
                         return val
-            return None
-        # no explicit name supplied; use heuristic
-        for f in fields:
-            # treat any field whose type is `password` or whose name/label
-            # contains the substring "pass" as a candidate.  this catches both
-            # "password" and "passphrase" (and other reasonable variants).
-            if f.get("type") == "password" or "pass" in (f.get("name") or "").lower() or "pass" in (f.get("label") or "").lower():
-                val = f.get("value")
-                if isinstance(val, str):
-                    return val
+
         # no match
         return None
 
