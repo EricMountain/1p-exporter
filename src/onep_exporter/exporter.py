@@ -9,6 +9,128 @@ from .utils import run_cmd, write_json, sha256_file, ensure_tool, CommandError
 from .templates import item_to_md, vault_to_md
 
 
+def _resolve_age_config(
+    exporter: "OpExporter",
+    *,
+    age_pass_source: str,
+    age_pass_item: Optional[str],
+    age_pass_field: str,
+    age_recipients: str,
+    age_use_yubikey: bool,
+    sync_passphrase_from_1password: bool,
+    age_keychain_service: str,
+    age_keychain_username: str,
+) -> tuple[Optional[str], list[str]]:
+    """Return *(passphrase, recipients)* for age encryption.
+
+    The logic mirrors the code previously embedded in :func:`run_backup` but is
+    executed early so we can fail before doing any network activity.  This
+    raises ``RuntimeError`` on mis-configuration (empty/ambiguous inputs or the
+    forbidden combination of a passphrase and explicit recipients).
+    """
+    import os
+    import getpass
+
+    # make sure the binary is present before we bother looking up any secrets
+    if not ensure_tool("age"):
+        raise RuntimeError("age not found for encryption")
+
+    # parse recipients early so we can avoid prompting unnecessarily
+    recipients = [r.strip() for r in (age_recipients or "").split(",") if r.strip()]
+    if age_use_yubikey and not recipients:
+        print("warning: --age-use-yubikey set but no explicit recipient provided; ensure your yubikey recipient is added via --age-recipients if you want hardware unlock")
+
+    passphrase: Optional[str] = None
+    stored_values: dict[str, str] = {}
+
+    # collect any stored passphrases we are aware of (1Password / keychain)
+    if age_pass_item:
+        try:
+            v = exporter.get_item_field_value(age_pass_item, age_pass_field)
+        except Exception:
+            v = None
+        if v:
+            stored_values["1password"] = v
+
+    try:
+        kc = _get_passphrase_from_keychain(
+            age_keychain_service, age_keychain_username)
+    except Exception:
+        kc = None
+    if kc:
+        stored_values["keychain"] = kc
+
+    # if the caller asked to treat the 1Password value as authoritative,
+    # copy it to other configured stores
+    if sync_passphrase_from_1password and stored_values.get("1password"):
+        auth = stored_values["1password"]
+        # env comes first; easiest to set and has highest precedence in the
+        # subsequent resolution logic.
+        os.environ["BACKUP_PASSPHRASE"] = auth
+        stored_values["env"] = auth
+        try:
+            _store_passphrase_in_keychain(
+                age_keychain_service, age_keychain_username, auth)
+            stored_values["keychain"] = auth
+        except Exception as e:  # pragma: no cover - best effort
+            raise RuntimeError(
+                f"failed to store passphrase in keychain during sync: {e}")
+
+    # if we found values in multiple stores verify they all agree
+    if len(stored_values) > 1:
+        unique_vals = set(stored_values.values())
+        if len(unique_vals) > 1:
+            raise RuntimeError(
+                f"passphrase mismatch between configured stores: {', '.join(sorted(stored_values.keys()))}")
+
+    # now pick a passphrase according to the requested source.  if the caller
+    # specifically requested a prompt *and* we already have recipients we skip
+    # the prompt because recipients are sufficient for encryption.
+    if age_pass_source == "env":
+        passphrase = os.environ.get("BACKUP_PASSPHRASE")
+    elif age_pass_source == "prompt":
+        if not recipients:
+            passphrase = getpass.getpass("Age passphrase for encryption: ")
+    elif age_pass_source == "1password":
+        if not age_pass_item:
+            raise RuntimeError(
+                "--age-pass-item is required when --age-pass-source=1password")
+        passphrase = exporter.get_item_field_value(age_pass_item, age_pass_field)
+        # do **not** fail immediately if the field is missing; we may be using
+        # explicit recipients instead.  a detailed error will be raised later
+        # if both passphrase *and* recipients are absent.
+        # the caller can still inspect `passphrase` value and make decisions.
+        # (a `None` value is permitted here.)
+    elif age_pass_source == "keychain":
+        try:
+            passphrase = _get_passphrase_from_keychain(
+                age_keychain_service, age_keychain_username)
+        except Exception as e:
+            raise RuntimeError(
+                f"failed to read passphrase from keychain: {e}")
+
+    if not passphrase and not recipients:
+        # give a more instructive message if we tried to read from 1Password
+        if age_pass_source == "1password":
+            raise RuntimeError(
+                f"could not extract passphrase from the specified 1Password item/field "
+                f"('{age_pass_item}', '{age_pass_field}'). "
+                "ensure the item exists, the field name is correct, and that it "
+                "contains a non-empty string"
+            )
+        raise RuntimeError(
+            "age encryption requires at least a passphrase or one recipient")
+
+    if passphrase and recipients:
+        raise RuntimeError(
+            "cannot use both a passphrase and recipients with age; "
+            "specify only one mechanism (remove --age-recipients or "
+            "disable the configured passphrase source)")
+
+    return passphrase, recipients
+
+
+
 class OpExporter:
     def __init__(self):
         if not ensure_tool("op"):
@@ -226,7 +348,7 @@ class OpExporter:
         return token
 
 
-def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "1password", age_pass_item: Optional[str] = None, age_pass_field: str = "passphrase", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
+def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "prompt", age_pass_item: Optional[str] = None, age_pass_field: str = "passphrase", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -243,6 +365,26 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     outdir = work_dir
 
     exporter = OpExporter()
+
+    # if we're going to use age encryption we want to resolve the passphrase
+    # / recipient configuration immediately, before we start fetching anything
+    # from 1Password.  this allows us to fail fast for common mis‑configurations
+    # (e.g. specifying both a passphrase source and explicit recipients) and
+    # avoids downloading vaults/attachments only to error out later.
+    passphrase = None
+    recipients: list[str] = []
+    if encrypt == "age":
+        passphrase, recipients = _resolve_age_config(
+            exporter,
+            age_pass_source=age_pass_source,
+            age_pass_item=age_pass_item,
+            age_pass_field=age_pass_field,
+            age_recipients=age_recipients,
+            age_use_yubikey=age_use_yubikey,
+            sync_passphrase_from_1password=sync_passphrase_from_1password,
+            age_keychain_service=age_keychain_service,
+            age_keychain_username=age_keychain_username,
+        )
 
     vaults = exporter.list_vaults()
     manifest = {
@@ -385,7 +527,6 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
         return archive_path
 
     # At this point we know encryption is requested.
-    # compute passphrase/recipients for the requested backend as before
     if encrypt == "gpg":
         if not ensure_tool("gpg"):
             raise RuntimeError("gpg not found for encryption")
@@ -402,118 +543,20 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                "--pinentry-mode", "loopback", "--passphrase", passphrase,
                "--output", out_enc]
     elif encrypt == "age":
+        # we already computed and validated age-specific configuration above
+        # in the preflight step and stored values in the local variables.
         if not ensure_tool("age"):
             raise RuntimeError("age not found for encryption")
-        import os
-        import getpass
-
-        # gather stored passphrases (for consistency checks / optional sync)
-        passphrase = None
-        stored_values = {}
-
-        # 1Password (only if an item reference is available)
-        if age_pass_item:
-            try:
-                v = exporter.get_item_field_value(
-                    age_pass_item, age_pass_field)
-            except Exception:
-                v = None
-            if v:
-                stored_values["1password"] = v
-
-        # keychain (platform/keyring may raise)
-        try:
-            kc = _get_passphrase_from_keychain(
-                age_keychain_service, age_keychain_username)
-        except Exception:
-            kc = None
-        if kc:
-            stored_values["keychain"] = kc
-
-        # environment variable
-        env_val = os.environ.get("BACKUP_PASSPHRASE")
-        if env_val:
-            stored_values["env"] = env_val
-
-        # If requested, sync authoritative value from 1Password into other stores.
-        if sync_passphrase_from_1password:
-            # ensure we can read 1Password value first
-            auth = stored_values.get("1password")
-            if not auth:
-                if age_pass_item:
-                    auth = exporter.get_item_field_value(
-                        age_pass_item, age_pass_field)
-                if not auth:
-                    raise RuntimeError(
-                        "--sync-passphrase-from-1password set but could not read passphrase from 1Password")
-
-            # sync to keychain if missing or different
-            try:
-                if stored_values.get("keychain") != auth:
-                    _store_passphrase_in_keychain(
-                        age_keychain_service, age_keychain_username, auth)
-                    stored_values["keychain"] = auth
-            except Exception as e:
-                raise RuntimeError(
-                    f"failed to store passphrase in keychain during sync: {e}")
-
-            # populate environment for this run (cannot persist across sessions)
-            if stored_values.get("env") != auth:
-                os.environ["BACKUP_PASSPHRASE"] = auth
-                stored_values["env"] = auth
-
-        # If the passphrase exists in more than one place, ensure they match
-        if len(stored_values) > 1:
-            unique_vals = set(stored_values.values())
-            if len(unique_vals) > 1:
-                raise RuntimeError(
-                    f"passphrase mismatch between configured stores: {', '.join(sorted(stored_values.keys()))}")
-
-        # determine passphrase source (respect user's configured source / CLI choice)
-        if age_pass_source == "env":
-            passphrase = os.environ.get("BACKUP_PASSPHRASE")
-        elif age_pass_source == "prompt":
-            passphrase = getpass.getpass("Age passphrase for encryption: ")
-        elif age_pass_source == "1password":
-            if not age_pass_item:
-                raise RuntimeError(
-                    "--age-pass-item is required when --age-pass-source=1password")
-            # read passphrase from the user's 1Password entry
-            passphrase = exporter.get_item_field_value(
-                age_pass_item, age_pass_field)
-            if not passphrase:
-                raise RuntimeError(
-                    f"could not extract passphrase from the specified 1Password item/field "
-                    f"('{age_pass_item}', '{age_pass_field}'). "
-                    "ensure the item exists, the field name is correct, and that it "
-                    "contains a non-empty string"
-                )
-        elif age_pass_source == "keychain":
-            # read from macOS Keychain (keyring if available, else `security`)
-            passphrase = None
-            try:
-                passphrase = _get_passphrase_from_keychain(
-                    age_keychain_service, age_keychain_username)
-            except Exception as e:
-                raise RuntimeError(
-                    f"failed to read passphrase from keychain: {e}")
-
-        recipients = [r.strip()
-                      for r in (age_recipients or "").split(",") if r.strip()]
-        if age_use_yubikey and not recipients:
-            # user asked for YubiKey support but provided no explicit recipient — warn and continue with passphrase only
-            print("warning: --age-use-yubikey set but no explicit recipient provided; ensure your yubikey recipient is added via --age-recipients if you want hardware unlock")
-
-        if not passphrase and not recipients:
-            raise RuntimeError(
-                "age encryption requires at least a passphrase or one recipient")
-
         out_enc = str(archive_path) + ".age"
         cmd = ["age", "-o", out_enc]
         for r in recipients:
             cmd.extend(["-r", r])
         if passphrase:
-            # include passphrase recipient; age supports --passphrase
+            # include passphrase flag; we already checked there are no
+            # recipients when a passphrase exists.
+            cmd.append("--passphrase")
+            # include passphrase flag; we already ensured no recipients are
+            # present above since age rejects the combination
             cmd.append("--passphrase")
     else:
         # This branch should not be reachable because we handled 'none' earlier
@@ -1169,6 +1212,12 @@ def doctor() -> bool:
         recipients = (age_cfg.get("recipients") or "").strip()
         if recipients:
             _ok("age.recipients configured")
+
+        # configuration sanity: these two options cannot both be present
+        if pass_source and recipients:
+            _err("age.pass_source and age.recipients are both set; age does not "
+                 "permit a passphrase together with explicit recipients")
+            ok = False
 
     # final summary
     print(_color("\n" + "─" * 52, "36"))

@@ -7,7 +7,7 @@
     "encrypt": "age",
     "download_attachments": true,
     "age": {
-        "pass_source": "1password",
+        "pass_source": "prompt",
         "pass_item": "1p-exporter backup - <your-username>",
         "pass_field": "passphrase",
         "recipients": "",

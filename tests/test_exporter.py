@@ -421,6 +421,55 @@ def test_passphrase_mismatch_raises(monkeypatch, tmp_path):
             "expected RuntimeError due to passphrase mismatch")
 
 
+def test_age_recipients_and_passphrase_conflict(monkeypatch, tmp_path):
+    # specifying an explicit passphrase via environment together with
+    # recipients should still trigger a configuration error early
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    monkeypatch.setenv("BACKUP_PASSPHRASE", "pw123")
+
+    # run_cmd/list_vaults should not be reached if validation runs first
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("run_cmd should not be called")))
+    monkeypatch.setattr(exporter_module.OpExporter, "list_vaults", lambda self: (_ for _ in ()).throw(AssertionError("list_vaults should not be called")))
+
+    with pytest.raises(RuntimeError) as exc:
+        exporter_module.run_backup(
+            output_base=str(tmp_path), encrypt="age",
+            age_pass_source="env",
+            age_recipients="age1abc,age1def",
+            quiet=True)
+    assert "cannot use both a passphrase and recipients" in str(exc.value)
+
+
+def test_age_encryption_with_recipients_only(monkeypatch, tmp_path):
+    # verify that specifying age recipients and no passphrase works
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+
+    # intercept Popen to inspect command
+    import io, subprocess
+    called = {"cmd": None}
+    class FakePopen:
+        def __init__(self, cmd, stdin=None, **kwargs):
+            called["cmd"] = cmd
+            self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
+            self.returncode = 0
+        def wait(self):
+            return self.returncode
+    import subprocess as _sub
+    monkeypatch.setattr(_sub, "Popen", FakePopen)
+
+    # no passphrase should be provided (env not set, prompt not called)
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda *args, **kwargs: (0, "[]", ""))
+
+    out = exporter_module.run_backup(
+        output_base=str(tmp_path), encrypt="age",
+        age_pass_source="env", age_recipients="age1foo,age1bar",
+        quiet=True)
+    # command should include recipients and omit --passphrase
+    assert "-r" in called["cmd"]
+    assert "--passphrase" not in called["cmd"]
+    assert out.suffix == ".age"
+
+
 
 
 def test_age_passphrase_not_found_reports_item_and_field(monkeypatch, tmp_path):
@@ -441,6 +490,76 @@ def test_age_passphrase_not_found_reports_item_and_field(monkeypatch, tmp_path):
     assert "could not extract passphrase" in msg
     assert "Item" in msg
     assert "password" in msg
+
+
+def test_age_missing_passphrase_with_recipients_still_works(monkeypatch, tmp_path):
+    # if the 1Password item has no passphrase but we supply recipients, backup
+    # should proceed using recipients alone and not raise
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "get_item_field_value", lambda self, item, field=None: None)
+    # intercept subprocess so we can check command later
+    import io, subprocess
+    called = {"cmd": None}
+    class FakePopen:
+        def __init__(self, cmd, stdin=None, **kwargs):
+            called["cmd"] = cmd
+            self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
+            self.returncode = 0
+        def wait(self):
+            return self.returncode
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    # stub list_vaults to avoid network
+    monkeypatch.setattr(exporter_module.OpExporter, "list_vaults", lambda self: [])
+    # ensure we do *not* prompt despite pass_source=1password; patch getpass as
+    # a sentinel that would explode if called
+    import getpass
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: (_ for _ in ()).throw(AssertionError("prompted unexpectedly")))
+
+    out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="age",
+                                      age_pass_source="1password",
+                                      age_pass_item="Item",
+                                      age_pass_field="password",
+                                      age_recipients="age1foo",
+                                      quiet=True)
+    # should have used age with recipient and no --passphrase
+    assert called["cmd"][0] == "age"
+    assert "-r" in called["cmd"]
+    assert "--passphrase" not in called["cmd"]
+    assert out.suffix == ".age"
+
+
+def test_age_pass_source_prompt_skipped_if_recipients(monkeypatch, tmp_path):
+    # with pass_source=prompt and an explicit recipient list we should **not**
+    # ask the user for a passphrase
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    # avoid any 1Password lookups
+    monkeypatch.setattr(exporter_module.OpExporter,
+                        "get_item_field_value", lambda self, item, field=None: None)
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda *args, **kwargs: (0, "[]", ""))
+    import getpass
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: (_ for _ in ()).throw(AssertionError("prompted unexpectedly")))
+    # intercept age subprocess
+    import io, subprocess
+    called = {"cmd": None}
+    class FakePopen:
+        def __init__(self, cmd, stdin=None, **kwargs):
+            called["cmd"] = cmd
+            self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
+            self.returncode = 0
+        def wait(self):
+            return self.returncode
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    # run backup: specifying recipients should make prompt irrelevant
+    out = exporter_module.run_backup(output_base=str(tmp_path), encrypt="age",
+                                      age_pass_source="prompt",
+                                      age_recipients="age1foo",
+                                      quiet=True)
+    assert called["cmd"][0] == "age"
+    assert "-r" in called["cmd"]
+    assert "--passphrase" not in called["cmd"]
+    assert out.suffix == ".age"
 
 
 def test_sync_passphrase_from_1password_to_keychain(monkeypatch, tmp_path):
@@ -587,3 +706,20 @@ def test_doctor_includes_security_for_darwin(monkeypatch, capsys):
 
     # `security` should appear in the tools section on darwin
     assert "`security` not found" in captured.out or "security" in captured.out
+
+
+def test_doctor_detects_age_conflict(monkeypatch, capsys):
+    # configuration that wrongly specifies both a passphrase source and
+    # explicit recipients should be flagged as an error in the doctor output
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    monkeypatch.setattr(exporter_module, "load_config", lambda: {
+        "encrypt": "age",
+        "age": {"pass_source": "env", "recipients": "age1foo"},
+    })
+    ok = exporter_module.doctor()
+    captured = capsys.readouterr()
+    assert ok is False
+    assert "recipients" in captured.out
+    assert "pass_source" in captured.out
+    # message should indicate the mutual exclusion
+    assert "both set" in captured.out or "explicit recipients" in captured.out

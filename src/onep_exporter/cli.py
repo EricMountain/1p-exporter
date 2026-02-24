@@ -121,7 +121,7 @@ def main(argv=None):
 
         age_cfg = cfg.get("age", {})
         age_pass_source = args.age_pass_source if hasattr(
-            args, "age_pass_source") else age_cfg.get("pass_source", "1password")
+            args, "age_pass_source") else age_cfg.get("pass_source", "prompt")
         age_pass_item = args.age_pass_item if hasattr(
             args, "age_pass_item") else age_cfg.get("pass_item")
         age_pass_field = args.age_pass_field if hasattr(

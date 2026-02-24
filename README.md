@@ -62,7 +62,14 @@ Verify the backup:
   - If the passphrase is present in multiple stores (1Password, Keychain, or the `BACKUP_PASSPHRASE` env), 1p-exporter will verify they are identical and will abort if they differ.
   - Use `--sync-passphrase-from-1password` to treat the value in 1Password as authoritative and copy it to other configured stores (keychain/ENV) before encrypting.
   - Use `--age-recipients` to include public recipients (e.g. YubiKey‑backed identities).
-
+  *Note:* age does **not** allow combining an explicit recipient list with the
+  `--passphrase` mode.  1p‑exporter will abort if both a passphrase is
+  configured (via env/1password/keychain) and one or more recipients are
+  specified; pick one method or remove the undesired value from your
+  configuration.  (If `pass_source` is set to `prompt` and recipients are present,
+  the prompt is skipped – the recipient list takes precedence.)  The
+  `doctor` command also checks for conflicting settings and will report an
+  error before you run a backup.
 Examples:
 
 ```bash

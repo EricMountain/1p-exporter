@@ -41,6 +41,21 @@ def test_cli_uses_config_defaults(monkeypatch):
     assert called["formats"] == ["json"]
 
 
+def test_cli_default_age_pass_source(monkeypatch):
+    # when neither CLI nor config specifies a pass source, the default should
+    # be "prompt" (not "1password", avoiding spurious fetches).
+    cfg = {"encrypt": "age", "formats": ["json"]}
+    monkeypatch.setattr(exporter_module, "load_config", lambda: cfg)
+    called = {}
+    def fake_run_backup(**kwargs):
+        called.update(kwargs)
+    import onep_exporter.cli as cli
+    monkeypatch.setattr(cli, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli, "run_backup", fake_run_backup)
+    cli.main(["backup"])
+    assert called.get("age_pass_source") == "prompt"
+
+
 def test_cli_flag_overrides_config(monkeypatch):
     cfg = {"output_base": "/tmp/fromcfg",
            "encrypt": "age", "formats": ["json"]}
