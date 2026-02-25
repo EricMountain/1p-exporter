@@ -132,6 +132,29 @@ def test_item_to_md_non_totp_field_unchanged():
     assert "(TOTP)" not in md
 
 
+def test_item_to_md_url_href_key():
+    """URLs using the 'href' key (as exported by 1Password) should appear in output."""
+    item = {
+        "title": "PayPal",
+        "urls": [{"label": "website", "primary": True, "href": "paypal.com"}],
+        "fields": [],
+    }
+    md = item_to_md(item)
+    assert "paypal.com" in md
+    assert "None" not in md
+
+
+def test_item_to_md_url_legacy_url_key():
+    """URLs using the legacy 'url' key should still work."""
+    item = {
+        "title": "Example",
+        "urls": [{"label": "website", "url": "example.com"}],
+        "fields": [],
+    }
+    md = item_to_md(item)
+    assert "example.com" in md
+
+
 def test_item_to_md_totp_field_case_insensitive_type():
     """Field type matching should be case-insensitive and accept both OTP and TOTP."""
     secret = "JBSWY3DPEHPK3PXP"

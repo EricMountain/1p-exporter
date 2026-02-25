@@ -68,7 +68,10 @@ def item_to_md(item: dict[str, Any]) -> str:
     lines.append("")
     # URLs
     for url in item.get("urls", []):
-        lines.append(f"- {url.get('label', '')} {url.get('url')}")
+        href = url.get("href") or url.get("url") or ""
+        label = url.get("label", "")
+        if href:
+            lines.append(f"- {label} {href}".strip())
     lines.append("")
     # Fields
     for f in item.get("fields", []):
