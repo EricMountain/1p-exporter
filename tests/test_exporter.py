@@ -472,6 +472,41 @@ def test_age_encryption_with_recipients_only(monkeypatch, tmp_path):
 
 
 
+def test_output_base_created_for_encrypted(monkeypatch, tmp_path):
+    # ensure the output_base directory is created automatically for age
+    monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
+    import io, subprocess
+    called = {"cmd": None}
+    class FakePopen:
+        def __init__(self, cmd, stdin=None, **kwargs):
+            # make sure the output directory has been created before age runs
+            from pathlib import Path
+            try:
+                idx = cmd.index("-o") + 1
+                outp = Path(cmd[idx])
+                assert outp.parent.exists(), (
+                    f"output parent {outp.parent!r} missing before running age")
+            except ValueError:
+                pass
+            called["cmd"] = cmd
+            self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
+            self.returncode = 0
+        def wait(self):
+            return self.returncode
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda *args, **kwargs: (0, "[]", ""))
+
+    base = tmp_path / "nope" / "sub"
+    assert not base.exists()
+    # avoid prompting during this test by stubbing getpass
+    import getpass
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "pw123")
+    out = exporter_module.run_backup(output_base=str(base), encrypt="age", age_pass_source="prompt", age_recipients="", quiet=True)
+    assert base.exists()
+    assert out.parent == base
+    assert out.suffix == ".age"
+
+
 def test_age_passphrase_not_found_reports_item_and_field(monkeypatch, tmp_path):
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
     # always fail to return a passphrase

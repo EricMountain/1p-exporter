@@ -350,6 +350,11 @@ class OpExporter:
 
 def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "md"), encrypt: str = "none", download_attachments: bool = True, quiet: bool = False, age_pass_source: str = "prompt", age_pass_item: Optional[str] = None, age_pass_field: str = "passphrase", age_recipients: str = "", age_use_yubikey: bool = False, sync_passphrase_from_1password: bool = False, age_keychain_service: str = "1p-exporter", age_keychain_username: str = "backup") -> Path:
     output_base = Path(output_base)
+    # create output directory right away; the encrypted archive is written to
+    # this location even when we stream through age/gpg, so the parent must
+    # exist or the subprocess will fail with "no such file or directory".
+    output_base.mkdir(parents=True, exist_ok=True)
+
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
     # when encrypting we don't want persistent plaintext files left behind,
