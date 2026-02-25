@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 from .exporter import run_backup, verify_manifest, load_config, configure_interactive, init_setup, OpExporter, doctor
 
 
@@ -88,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     ql.add_argument("pattern", help="regular expression to match item titles")
     ql.add_argument("--dir", "-d", default=".",
                     help="path to directory containing exported JSON (default: current directory)")
+    ql.add_argument("--age-identity", action="append", dest="age_identities",
+                    help="path to an age identity file to use for decrypting archives; can be repeated."
+                    )
+    ql.add_argument("--age-passphrase", dest="age_passphrase",
+                    help="passphrase to use when decrypting age archives; sets BACKUP_PASSPHRASE environment variable")
 
     return p
 
@@ -186,6 +192,16 @@ def main(argv=None):
         if args.query_cmd == "list":
             # perform the search and print matching titles
             from .exporter import query_list_titles
+
+            # allow quick CLI-based provision of decryption helpers; these
+            # simply set the environment variables that ``query_list_titles``
+            # respects.  environment has higher precedence than searching for
+            # identities in the user's home config.
+            if hasattr(args, "age_passphrase") and args.age_passphrase is not None:
+                os.environ["BACKUP_PASSPHRASE"] = args.age_passphrase
+            if hasattr(args, "age_identities") and args.age_identities:
+                # join with pathsep so the function can split them later
+                os.environ["AGE_IDENTITIES"] = os.pathsep.join(args.age_identities)
 
             try:
                 # first argument is path (from --dir), second is regexp pattern

@@ -106,7 +106,7 @@ See `examples/config.example.json` for a ready-to-copy sample configuration.
 - `1p-exporter init` — interactive setup and optional passphrase storage
 - `1p-exporter backup [--encrypt age|gpg|none]` — run export (CLI overrides config)
 - `1p-exporter verify <manifest.json>` — verify manifest integrity
-- `1p-exporter query list <regexp> [--dir DIR]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory)
+- `1p-exporter query list <regexp> [--dir DIR] [--age-identity PATH] [--age-passphrase PASS]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory).  When the target is an encrypted archive the command will attempt to decrypt it using the `age` tool; you can supply decryption helpers via `--age-identity` (repeatable) or `--age-passphrase`, or set the corresponding environment variables `AGE_IDENTITIES` and `BACKUP_PASSPHRASE` instead.
 
 ### Query examples
 

@@ -988,26 +988,110 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
     regex = re.compile(pattern)
     matches: List[str] = []
 
-    # support scanning a tar/tar.gz/age archive directly
-    if p.is_file() and (p.suffix in (".tar", ".tgz", ".gz", ".age") or p.name.endswith(".tar.gz") or p.name.endswith(".tar.age")):
+    # support scanning a tar/tar.gz archive directly, or an age-encrypted
+    # archive produced by ``run_backup --encrypt age``.  When the file appears
+    # to be wrapped in age we shell out to the ``age`` tool to perform
+    # decryption and then feed the resulting stream to tarfile.  The caller
+    # is responsible for ensuring any necessary identities/passphrases are
+    # available (age will prompt or consult its usual key directories).
+    def _scan_tarfile(tf):
+        for member in tf.getmembers():
+            name = member.name
+            if not name.endswith(".json") or name.endswith("manifest.json"):
+                continue
+            fobj = tf.extractfile(member)
+            if not fobj:
+                continue
+            try:
+                data = json.load(fobj)
+            except Exception:
+                continue
+            if isinstance(data, list):
+                for item in data:
+                    title = item.get("title")
+                    if title and regex.search(title):
+                        matches.append(title)
+
+    # first, look for an age-wrapped archive; we check both the raw suffix and
+    # the common filename patterns produced by run_backup.
+    if p.is_file() and (p.suffix == ".age" or p.name.endswith(".tar.age") or p.name.endswith(".tar.gz.age")):
+        # require the age binary in PATH so we can error early if it's missing
+        if not ensure_tool("age"):
+            raise RuntimeError("age not found for decryption")
+        import subprocess
+
+        # build command and optionally feed a passphrase from the
+        # BACKUP_PASSPHRASE environment variable. when age is invoked with
+        # ``--passphrase`` it will read the secret from stdin and then ignore
+        # the rest of the stream, so we can safely write the passphrase and
+        # still use stdout for the decrypted archive contents. identities
+        # (provided via AGE_IDENTITIES) must appear *before* the input file
+        # argument, so we build the prefix separately and add the archive path
+        # last.
+        cmd = ["age", "--decrypt", "-o", "-"]
+        env_pass = None
+        try:
+            import os
+            env_pass = os.environ.get("BACKUP_PASSPHRASE")
+            ids = os.environ.get("AGE_IDENTITIES")
+            if ids:
+                for entry in ids.split(os.pathsep):
+                    if entry:
+                        cmd.extend(["-i", entry])
+        except Exception:
+            env_pass = None
+        # finally the encrypted file path
+        cmd.append(str(p))
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            # just in case ensure_tool lied
+            raise RuntimeError("age not found for decryption")
+
+        # optionally supply a passphrase on stdin
+        if env_pass is not None:
+            try:
+                proc.stdin.write(env_pass.encode() + b"\n")
+            except Exception:
+                pass
+        proc.stdin.close()
+
+        # wait for the subprocess to finish and capture all output so we can
+        # report any errors.  this avoids having a half-read pipe confuse
+        # tarfile (which previously resulted in ``empty file`` errors when
+        # decryption failed).
+        out_bytes, err_bytes = proc.communicate()
+        rc = proc.returncode
+        if rc != 0:
+            err = err_bytes.decode(errors="ignore").strip()
+            raise RuntimeError(f"age decryption failed: {err or rc}")
+        if not out_bytes:
+            # nothing to parse
+            raise RuntimeError(
+                f"age decryption produced no output (rc=0, stderr={err_bytes!r})"
+            )
+
+        # now parse the decrypted tar data from memory
+        import io
+        try:
+            with io.BytesIO(out_bytes) as bio:
+                with tarfile.open(fileobj=bio, mode="r:*") as tf:
+                    _scan_tarfile(tf)
+        except Exception as e:
+            raise RuntimeError(f"failed to read archive {p}: {e}")
+        return matches
+
+    # otherwise treat path as a directory tree or a plain tar file
+    if p.is_file() and (p.suffix in (".tar", ".tgz", ".gz") or p.name.endswith(".tar.gz")):
         try:
             with tarfile.open(p, "r:*") as tf:
-                for member in tf.getmembers():
-                    name = member.name
-                    if not name.endswith(".json") or name.endswith("manifest.json"):
-                        continue
-                    fobj = tf.extractfile(member)
-                    if not fobj:
-                        continue
-                    try:
-                        data = json.load(fobj)
-                    except Exception:
-                        continue
-                    if isinstance(data, list):
-                        for item in data:
-                            title = item.get("title")
-                            if title and regex.search(title):
-                                matches.append(title)
+                _scan_tarfile(tf)
         except Exception as e:
             raise RuntimeError(f"failed to read archive {p}: {e}")
         return matches
