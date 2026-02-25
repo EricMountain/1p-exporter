@@ -368,7 +368,7 @@ def test_query_get_cli_json(tmp_path, capsys):
     (tmp_path / "vault.json").write_text(json.dumps(data))
 
     with pytest.raises(SystemExit) as exc:
-        main(["query", "get", "MyPass", "--dir", str(tmp_path)])
+        main(["query", "get", "MyPass", "--dir", str(tmp_path), "--format", "json"])
     assert exc.value.code == 0
     captured = capsys.readouterr()
     parsed = json.loads(captured.out)
@@ -384,6 +384,20 @@ def test_query_get_cli_md(tmp_path, capsys):
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "MDItem" in captured.out
+
+
+def test_query_get_cli_default_md(tmp_path, capsys):
+    """Default output format (no --format flag) should be markdown."""
+    data = [{"id": "x2d", "title": "DefaultMD", "fields": []}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "DefaultMD", "--dir", str(tmp_path)])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "DefaultMD" in captured.out
+    # must NOT be raw JSON (no leading '{')
+    assert not captured.out.strip().startswith("{")
 
 
 def test_query_get_cli_field(tmp_path, capsys):

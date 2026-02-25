@@ -103,9 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     qg.add_argument("item", help="item title (exact, case-sensitive) or item id to retrieve")
     qg.add_argument("--dir", "-d", default=".",
                     help="path to directory containing exported JSON (default: current directory)")
-    qg.add_argument("--format", choices=["json", "md"], default="json",
+    qg.add_argument("--format", choices=["json", "md"], default="md",
                     dest="output_format",
-                    help="output format: json (default) or md (markdown)")
+                    help="output format: md/markdown (default) or json")
     qg.add_argument("--field", metavar="FIELD",
                     help="print only the value of the named field instead of the full item")
     qg.add_argument("--age-identity", action="append", dest="age_identities",
@@ -264,11 +264,11 @@ def main(argv=None):
                     print(f"error: field {args.field!r} not found in item")
                     sys.exit(1)
                 print(value)
-            elif args.output_format == "md":
-                print(item_to_md(item))
-            else:
+            elif args.output_format == "json":
                 import json
                 print(json.dumps(item, indent=2))
+            else:
+                print(item_to_md(item))
             sys.exit(0)
         else:
             q.print_help()
