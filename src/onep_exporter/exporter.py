@@ -1,3 +1,4 @@
+import atexit
 import json
 import tarfile
 import tempfile
@@ -364,6 +365,7 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     if encrypt != "none":
         import tempfile, shutil
         work_dir = Path(tempfile.mkdtemp())
+        atexit.register(shutil.rmtree, work_dir, ignore_errors=True)
     else:
         work_dir = output_base / ts
         work_dir.mkdir(parents=True, exist_ok=True)
