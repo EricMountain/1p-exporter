@@ -106,7 +106,11 @@ See `examples/config.example.json` for a ready-to-copy sample configuration.
 - `1p-exporter init` — interactive setup and optional passphrase storage
 - `1p-exporter backup [--encrypt age|gpg|none]` — run export (CLI overrides config)
 - `1p-exporter verify <manifest.json>` — verify manifest integrity
-- `1p-exporter query list <regexp> [--dir DIR] [--age-identity PATH] [--age-passphrase PASS]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory).  When the target is an encrypted archive the command will attempt to decrypt it using the `age` tool; you can supply decryption helpers via `--age-identity` (repeatable) or `--age-passphrase`, or set the corresponding environment variables `AGE_IDENTITIES` and `BACKUP_PASSPHRASE` instead.
+- `1p-exporter query list <regexp> [--dir DIR] [--age-identity PATH] [--age-passphrase PASS]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory).  When the target is an encrypted archive the command will attempt to decrypt it using the `age` tool.  Decryption credentials may be provided in several ways:
+  * `--age-identity PATH` (repeatable) or `AGE_IDENTITIES` env var – path(s) to age identity file(s).
+  * `--age-passphrase PASS` or `BACKUP_PASSPHRASE` env var – symmetric passphrase (user will need to supply it manually since age does not support non‑interactive passphrase input).
+  * **automatic lookup** – if no credentials are supplied the tool will consult your saved configuration and, if you previously stored an age private key/passphrase in 1Password or the macOS keychain, it will fetch them and use them transparently.
+
 
 ### Query examples
 

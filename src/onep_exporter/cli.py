@@ -1,7 +1,7 @@
 import argparse
 import sys
 import os
-from .exporter import run_backup, verify_manifest, load_config, configure_interactive, init_setup, OpExporter, doctor
+from .exporter import run_backup, verify_manifest, load_config, configure_interactive, init_setup, OpExporter, doctor, sync_keychain
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser(
         "doctor", help="Sanity-check environment and configuration")
+
+    sk = sub.add_parser(
+        "sync-keychain",
+        help="Pull age credentials from 1Password into macOS keychain for offline decryption")
 
     # 'query' command for post-processing exported data
     q = sub.add_parser("query", help="Query exported backup data")
@@ -187,6 +191,9 @@ def main(argv=None):
     elif args.cmd == "doctor":
         ok = doctor()
         sys.exit(0 if ok else 2)
+    elif args.cmd == "sync-keychain":
+        ok = sync_keychain()
+        sys.exit(0 if ok else 1)
     elif args.cmd == "query":
         # only subcommand supported so far is ``list``
         if args.query_cmd == "list":

@@ -391,6 +391,17 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
             age_keychain_username=age_keychain_username,
         )
 
+        # sync decryption credentials to local keychain so that query-time
+        # operations work without 1Password being available.
+        _sync_age_credentials_to_keychain(
+            exporter,
+            age_pass_item=age_pass_item,
+            age_pass_field=age_pass_field,
+            age_keychain_service=age_keychain_service,
+            age_keychain_username=age_keychain_username,
+            passphrase=passphrase,
+        )
+
     vaults = exporter.list_vaults()
     manifest = {
         "timestamp": ts,
@@ -598,6 +609,249 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     return Path(out_enc)
 
 
+def _resolve_decrypt_credentials(cfg: dict, *, verbose: bool = True) -> tuple[Optional[str], Optional[str]]:
+    """Resolve credentials for age decryption, preferring **local** stores.
+
+    Returns ``(identity_path_or_none, passphrase_or_none)``.  The caller should
+    use whichever value is non-None to build the ``age --decrypt`` command.
+
+    Resolution order (stops at first hit):
+
+    1. ``AGE_IDENTITIES`` environment variable
+    2. ``BACKUP_PASSPHRASE`` environment variable
+    3. macOS keychain — ``age_private_key`` entry (written during backup/configure)
+    4. macOS keychain — passphrase entry
+    5. Default age keys file (``~/.config/age/keys.txt``)
+    6. 1Password item (if configured) — ``age_private_key`` field
+    7. 1Password item (if configured) — passphrase field
+
+    This function **never prompts** for input.  If no credentials can be found
+    it returns ``(None, None)`` and the caller should raise a helpful error.
+
+    When *verbose* is True (the default), each step is printed to stderr so the
+    user can see which credential sources were attempted.
+    """
+    import os
+    import sys
+    import tempfile
+
+    age_cfg = cfg.get("age", {})
+    kc_service = age_cfg.get("keychain_service", "1p-exporter")
+
+    def _log(msg: str) -> None:
+        if verbose:
+            print(msg, file=sys.stderr)
+
+    _log("resolving age decryption credentials …")
+    _log(f"  config: {_config_file_path()}")
+    _log(f"  age section: {age_cfg!r}")
+
+    # 1. environment: identity file
+    ids = os.environ.get("AGE_IDENTITIES")
+    if ids:
+        _log(f"  ✓ AGE_IDENTITIES env var → {ids}")
+        return (ids, None)
+    _log("  ✗ AGE_IDENTITIES env var not set")
+
+    # 2. environment: passphrase
+    env_pass = os.environ.get("BACKUP_PASSPHRASE")
+    if env_pass:
+        _log("  ✓ BACKUP_PASSPHRASE env var set")
+        return (None, env_pass)
+    _log("  ✗ BACKUP_PASSPHRASE env var not set")
+
+    # 3. keychain: private key (stored under account "age_private_key")
+    kc_key_desc = f"keychain service={kc_service!r} account='age_private_key'"
+    try:
+        priv = _get_passphrase_from_keychain(kc_service, "age_private_key")
+    except Exception as exc:
+        priv = None
+        _log(f"  ✗ {kc_key_desc}: {exc}")
+    if priv:
+        tf = tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".txt")
+        tf.write(priv)
+        tf.flush()
+        tf.close()
+        _log(f"  ✓ {kc_key_desc} → wrote identity to {tf.name}")
+        return (tf.name, None)
+    if priv is None:
+        _log(f"  ✗ {kc_key_desc}: not found")
+
+    # 4. keychain: passphrase
+    kc_username = age_cfg.get("keychain_username", "backup")
+    kc_pass_desc = f"keychain service={kc_service!r} account={kc_username!r}"
+    try:
+        kc_pass = _get_passphrase_from_keychain(kc_service, kc_username)
+    except Exception as exc:
+        kc_pass = None
+        _log(f"  ✗ {kc_pass_desc}: {exc}")
+    if kc_pass:
+        _log(f"  ✓ {kc_pass_desc} → passphrase found")
+        return (None, kc_pass)
+    if kc_pass is None:
+        _log(f"  ✗ {kc_pass_desc}: not found")
+
+    # 5. default age keys file
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    keys_dir = Path(xdg) / "age" if xdg else Path.home() / ".config" / "age"
+    keys_file = keys_dir / "keys.txt"
+    if keys_file.is_file():
+        _log(f"  ✓ default keys file → {keys_file}")
+        return (str(keys_file), None)
+    _log(f"  ✗ default keys file not found ({keys_file})")
+
+    # 6/7. 1Password (remote — last resort)
+    item_ref = age_cfg.get("pass_item")
+    if item_ref:
+        _log(f"  … trying 1Password item {item_ref!r} (field 'age_private_key')")
+        try:
+            exporter = OpExporter()
+            priv = exporter.get_item_field_value(item_ref, "age_private_key")
+            if priv:
+                tf = tempfile.NamedTemporaryFile(
+                    delete=False, mode="w", suffix=".txt")
+                tf.write(priv)
+                tf.flush()
+                tf.close()
+                _log(f"  ✓ 1Password age_private_key → wrote identity to {tf.name}")
+                return (tf.name, None)
+            else:
+                _log(f"  ✗ 1Password item {item_ref!r} field 'age_private_key': empty/missing")
+        except Exception as exc:
+            _log(f"  ✗ 1Password item {item_ref!r} field 'age_private_key': {exc}")
+        # try passphrase field
+        pass_field = age_cfg.get("pass_field", "passphrase")
+        _log(f"  … trying 1Password item {item_ref!r} (field {pass_field!r})")
+        try:
+            passphrase = exporter.get_item_field_value(item_ref, pass_field)
+            if passphrase:
+                _log(f"  ✓ 1Password passphrase found")
+                return (None, passphrase)
+            else:
+                _log(f"  ✗ 1Password item {item_ref!r} field {pass_field!r}: empty/missing")
+        except Exception as exc:
+            _log(f"  ✗ 1Password item {item_ref!r} field {pass_field!r}: {exc}")
+    else:
+        _log("  ✗ no 1Password item configured (age.pass_item not set)")
+
+    _log("  no credentials found")
+    return (None, None)
+
+
+def _sync_age_credentials_to_keychain(
+    exporter: "OpExporter",
+    *,
+    age_pass_item: Optional[str],
+    age_pass_field: str = "passphrase",
+    age_keychain_service: str = "1p-exporter",
+    age_keychain_username: str = "backup",
+    passphrase: Optional[str] = None,
+) -> None:
+    """Ensure that age decryption credentials are available in local stores.
+
+    Called during backup to copy secrets from 1Password into macOS keychain so
+    that query-time operations can work without 1Password being available.
+    Failures are logged but never fatal — the backup itself should not be
+    blocked by a keychain write problem.
+    """
+    # sync private key
+    if age_pass_item:
+        try:
+            priv = exporter.get_item_field_value(age_pass_item, "age_private_key")
+        except Exception:
+            priv = None
+        if priv:
+            try:
+                _store_passphrase_in_keychain(
+                    age_keychain_service, "age_private_key", priv)
+            except Exception as e:
+                print(f"warning: failed to sync age private key to keychain: {e}")
+
+    # sync passphrase (if one was used or exists in 1Password)
+    if passphrase:
+        try:
+            _store_passphrase_in_keychain(
+                age_keychain_service, age_keychain_username, passphrase)
+        except Exception as e:
+            print(f"warning: failed to sync passphrase to keychain: {e}")
+    elif age_pass_item:
+        try:
+            pp = exporter.get_item_field_value(age_pass_item, age_pass_field)
+        except Exception:
+            pp = None
+        if pp:
+            try:
+                _store_passphrase_in_keychain(
+                    age_keychain_service, age_keychain_username, pp)
+            except Exception as e:
+                print(f"warning: failed to sync passphrase to keychain: {e}")
+
+
+def sync_keychain() -> bool:
+    """Pull age credentials from 1Password and store them in macOS keychain.
+
+    Reads the saved configuration to find the 1Password item, fetches the
+    ``age_private_key`` and ``passphrase`` fields, and writes them to the
+    keychain.  Returns True if at least one credential was synced.
+    """
+    import sys
+
+    cfg = load_config()
+    age_cfg = cfg.get("age", {})
+    item_ref = age_cfg.get("pass_item")
+    if not item_ref:
+        print("error: age.pass_item is not set in config; run `1p-exporter init` first",
+              file=sys.stderr)
+        return False
+
+    kc_service = age_cfg.get("keychain_service", "1p-exporter")
+    kc_username = age_cfg.get("keychain_username", "backup")
+    pass_field = age_cfg.get("pass_field", "passphrase")
+
+    exporter = OpExporter()
+    synced = 0
+
+    # private key
+    print(f"fetching age_private_key from 1Password item '{item_ref}' …")
+    try:
+        priv = exporter.get_item_field_value(item_ref, "age_private_key")
+    except Exception as e:
+        print(f"  ✗ failed: {e}", file=sys.stderr)
+        priv = None
+    if priv:
+        try:
+            _store_passphrase_in_keychain(kc_service, "age_private_key", priv)
+            print(f"  ✓ stored in keychain (service={kc_service!r} account='age_private_key')")
+            synced += 1
+        except Exception as e:
+            print(f"  ✗ keychain write failed: {e}", file=sys.stderr)
+    else:
+        print("  ✗ no age_private_key found in 1Password item")
+
+    # passphrase
+    print(f"fetching {pass_field!r} from 1Password item '{item_ref}' …")
+    try:
+        pp = exporter.get_item_field_value(item_ref, pass_field)
+    except Exception as e:
+        print(f"  ✗ failed: {e}", file=sys.stderr)
+        pp = None
+    if pp:
+        try:
+            _store_passphrase_in_keychain(kc_service, kc_username, pp)
+            print(f"  ✓ stored in keychain (service={kc_service!r} account={kc_username!r})")
+            synced += 1
+        except Exception as e:
+            print(f"  ✗ keychain write failed: {e}", file=sys.stderr)
+    else:
+        print(f"  ✗ no {pass_field!r} found in 1Password item")
+
+    if synced:
+        print(f"synced {synced} credential(s) to keychain")
+    else:
+        print("no credentials synced", file=sys.stderr)
+    return synced > 0
+
+
 def _get_passphrase_from_keychain(service: str, username: str) -> Optional[str]:
     """Attempt to get a password from macOS keychain (or platform keyring if available).
 
@@ -712,6 +966,12 @@ def _generate_age_keypair_and_store(exporter: 'OpExporter', item_id: str) -> Opt
     except Exception as e:
         print(f"warning: failed to store private key in 1Password: {e}")
 
+    # Also store in local keychain so query-time decryption works without 1Password
+    try:
+        _store_passphrase_in_keychain("1p-exporter", "age_private_key", private_key)
+    except Exception as e:
+        print(f"warning: failed to store private key in keychain: {e}")
+
     print(f"Generated age recipient: {pub}")
     return pub
 
@@ -789,7 +1049,9 @@ def load_config() -> dict:
         try:
             with p.open("r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as exc:
+            import sys
+            print(f"warning: failed to parse config {p}: {exc}", file=sys.stderr)
             return {}
     # fallback to legacy config path (`onep-exporter`) for backward compatibility
     legacy = p.parent.parent / "onep-exporter" / p.name
@@ -797,7 +1059,9 @@ def load_config() -> dict:
         try:
             with legacy.open("r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as exc:
+            import sys
+            print(f"warning: failed to parse config {legacy}: {exc}", file=sys.stderr)
             return {}
     return {}
 
@@ -883,6 +1147,14 @@ def configure_interactive() -> dict:
             if not reuse.lower().startswith("y"):
                 generated_pub = _generate_age_keypair_and_store(
                     exporter, item_id)
+            else:
+                # sync existing private key to local keychain
+                try:
+                    _store_passphrase_in_keychain(
+                        age_keychain_service, "age_private_key",
+                        existing_private_key)
+                except Exception as e:
+                    print(f"warning: failed to sync private key to keychain: {e}")
         else:
             gen_key = prompt("Generate a new age keypair? (y/n)", "y")
             if gen_key.lower().startswith("y"):
@@ -929,6 +1201,14 @@ def configure_interactive() -> dict:
                       f"'{op_item_title}', field 'passphrase'.")
                 print(f"To export it safely, use:  "
                       f"op item get '{op_item_title}' --field passphrase")
+            else:
+                passphrase = existing_passphrase
+            # sync passphrase to local keychain
+            try:
+                _store_passphrase_in_keychain(
+                    age_keychain_service, age_keychain_username, passphrase)
+            except Exception as e:
+                print(f"warning: failed to sync passphrase to keychain: {e}")
         else:
             gen_pp = prompt("Generate a new passphrase? (y/n)", "y")
             if gen_pp.lower().startswith("y"):
@@ -940,6 +1220,12 @@ def configure_interactive() -> dict:
             except Exception as e:
                 print(
                     f"warning: failed to store passphrase in 1Password: {e}")
+            # sync passphrase to local keychain
+            try:
+                _store_passphrase_in_keychain(
+                    age_keychain_service, age_keychain_username, passphrase)
+            except Exception as e:
+                print(f"warning: failed to sync passphrase to keychain: {e}")
             print(f"Passphrase stored in 1Password item "
                   f"'{op_item_title}', field 'passphrase'.")
             print(f"To export it safely, use:  "
@@ -1020,27 +1306,24 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
             raise RuntimeError("age not found for decryption")
         import subprocess
 
-        # build command and optionally feed a passphrase from the
-        # BACKUP_PASSPHRASE environment variable. when age is invoked with
-        # ``--passphrase`` it will read the secret from stdin and then ignore
-        # the rest of the stream, so we can safely write the passphrase and
-        # still use stdout for the decrypted archive contents. identities
-        # (provided via AGE_IDENTITIES) must appear *before* the input file
-        # argument, so we build the prefix separately and add the archive path
-        # last.
-        cmd = ["age", "--decrypt", "-o", "-"]
-        env_pass = None
+        # resolve decryption credentials using the local-first strategy:
+        # env vars → keychain → default age keys → 1Password (last resort).
+        # this ensures ``query list`` works even when 1Password is unavailable.
+        import os
         try:
-            import os
-            env_pass = os.environ.get("BACKUP_PASSPHRASE")
-            ids = os.environ.get("AGE_IDENTITIES")
-            if ids:
-                for entry in ids.split(os.pathsep):
-                    if entry:
-                        cmd.extend(["-i", entry])
-        except Exception:
-            env_pass = None
-        # finally the encrypted file path
+            cfg = load_config()
+        except Exception as exc:
+            import sys
+            print(f"warning: failed to load config: {exc}", file=sys.stderr)
+            cfg = {}
+        ids, env_pass = _resolve_decrypt_credentials(cfg)
+
+        # build the command line. identities (if any) go before the path.
+        cmd = ["age", "--decrypt", "-o", "-"]
+        if ids:
+            for entry in ids.split(os.pathsep):
+                if entry:
+                    cmd.extend(["-i", entry])
         cmd.append(str(p))
 
         try:
@@ -1070,6 +1353,11 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
         rc = proc.returncode
         if rc != 0:
             err = err_bytes.decode(errors="ignore").strip()
+            # provide a more user-friendly hint when failure is due to missing
+            # credentials rather than generic corruption
+            if "identities are required" in err or "not passphrase-encrypted" in err:
+                err += ("; ensure you have an age identity available (e.g. run `1p-exporter init` "
+                        "to store one in 1Password, or use --age-identity/--age-passphrase)")
             raise RuntimeError(f"age decryption failed: {err or rc}")
         if not out_bytes:
             # nothing to parse
