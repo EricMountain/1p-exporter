@@ -297,3 +297,122 @@ def test_query_list_age(tmp_path):
     # the query function should transparently decrypt and search
     res = query_list_titles(enc, "sp")
     assert res == ["spam"]
+
+
+# ---------------------------------------------------------------------------
+# query get (query_get_item + CLI)
+# ---------------------------------------------------------------------------
+
+from onep_exporter.exporter import query_get_item
+
+
+def test_query_get_item_by_title(tmp_path):
+    data = [
+        {"id": "i1", "title": "FooItem", "fields": [{"label": "password", "value": "secret"}]},
+        {"id": "i2", "title": "Bar"},
+    ]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    item = query_get_item(tmp_path, "FooItem")
+    assert item["id"] == "i1"
+    assert item["title"] == "FooItem"
+
+
+def test_query_get_item_by_id(tmp_path):
+    data = [{"id": "abc123", "title": "SomeItem"}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    item = query_get_item(tmp_path, "abc123")
+    assert item["title"] == "SomeItem"
+
+
+def test_query_get_item_not_found(tmp_path):
+    data = [{"id": "i1", "title": "FooItem"}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(KeyError, match="no item found"):
+        query_get_item(tmp_path, "DoesNotExist")
+
+
+def test_query_get_item_ambiguous(tmp_path):
+    # two items with the same title in different vault files
+    data1 = [{"id": "i1", "title": "Duplicate"}]
+    data2 = [{"id": "i2", "title": "Duplicate"}]
+    (tmp_path / "vault-a.json").write_text(json.dumps(data1))
+    (tmp_path / "vault-b.json").write_text(json.dumps(data2))
+
+    with pytest.raises(ValueError, match="multiple items"):
+        query_get_item(tmp_path, "Duplicate")
+
+
+def test_query_get_item_tarball(tmp_path):
+    import tarfile as _tarfile
+
+    root = tmp_path / "out"
+    root.mkdir()
+    data = [{"id": "t1", "title": "TarItem"}, {"id": "t2", "title": "Other"}]
+    (root / "vault.json").write_text(json.dumps(data))
+    archive = tmp_path / "archive.tar.gz"
+    with _tarfile.open(archive, "w:gz") as tf:
+        tf.add(root / "vault.json", arcname="vault.json")
+
+    item = query_get_item(archive, "TarItem")
+    assert item["id"] == "t1"
+
+
+def test_query_get_cli_json(tmp_path, capsys):
+    data = [{"id": "x1", "title": "MyPass", "fields": []}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "MyPass", "--dir", str(tmp_path)])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["id"] == "x1"
+
+
+def test_query_get_cli_md(tmp_path, capsys):
+    data = [{"id": "x2", "title": "MDItem", "fields": []}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "MDItem", "--dir", str(tmp_path), "--format", "md"])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "MDItem" in captured.out
+
+
+def test_query_get_cli_field(tmp_path, capsys):
+    data = [{"id": "x3", "title": "FieldItem", "fields": [
+        {"label": "password", "name": "password", "value": "hunter2"}
+    ]}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "FieldItem", "--dir", str(tmp_path), "--field", "password"])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "hunter2"
+
+
+def test_query_get_cli_field_missing(tmp_path, capsys):
+    data = [{"id": "x4", "title": "NoField", "fields": []}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "NoField", "--dir", str(tmp_path), "--field", "nonexistent"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "error" in captured.out
+
+
+def test_query_get_cli_not_found(tmp_path, capsys):
+    data = [{"id": "x5", "title": "Something"}]
+    (tmp_path / "vault.json").write_text(json.dumps(data))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["query", "get", "NotHere", "--dir", str(tmp_path)])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "error" in captured.out

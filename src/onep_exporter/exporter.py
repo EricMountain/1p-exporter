@@ -1254,16 +1254,14 @@ def configure_interactive() -> dict:
     return new_cfg
 
 
-def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
-    """Return item titles matching *pattern* in exported JSON under *path*.
+def _iter_exported_items(path: Union[str, Path]):
+    """Yield all item dicts from exported backup data at *path*.
 
     *path* may be a directory containing per-vault JSON exports (as produced by
-    :func:`run_backup`) or a tar archive created by a backup.  The function
-    searches for ``*.json`` files (skipping ``manifest.json``) and extracts a
-    list of titles from any list-valued JSON, filtering with the provided
-    regular expression.  A ``re.compile`` error will propagate to the caller.
+    :func:`run_backup`), a plain tar/tar.gz archive, or an age-encrypted
+    archive.  Each yielded value is a ``dict`` parsed from a vault JSON file
+    (i.e. one element of the top-level list in a per-vault export).
     """
-    import re
     import json
     import tarfile
 
@@ -1271,16 +1269,7 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
     if not p.exists():
         raise FileNotFoundError(f"path not found: {p}")
 
-    regex = re.compile(pattern)
-    matches: List[str] = []
-
-    # support scanning a tar/tar.gz archive directly, or an age-encrypted
-    # archive produced by ``run_backup --encrypt age``.  When the file appears
-    # to be wrapped in age we shell out to the ``age`` tool to perform
-    # decryption and then feed the resulting stream to tarfile.  The caller
-    # is responsible for ensuring any necessary identities/passphrases are
-    # available (age will prompt or consult its usual key directories).
-    def _scan_tarfile(tf):
+    def _items_from_tarfile(tf):
         for member in tf.getmembers():
             name = member.name
             if not name.endswith(".json") or name.endswith("manifest.json"):
@@ -1293,23 +1282,15 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
             except Exception:
                 continue
             if isinstance(data, list):
-                for item in data:
-                    title = item.get("title")
-                    if title and regex.search(title):
-                        matches.append(title)
+                yield from data
 
-    # first, look for an age-wrapped archive; we check both the raw suffix and
-    # the common filename patterns produced by run_backup.
+    # age-wrapped archive: decrypt first, then parse the embedded tar stream.
     if p.is_file() and (p.suffix == ".age" or p.name.endswith(".tar.age") or p.name.endswith(".tar.gz.age")):
-        # require the age binary in PATH so we can error early if it's missing
         if not ensure_tool("age"):
             raise RuntimeError("age not found for decryption")
         import subprocess
-
-        # resolve decryption credentials using the local-first strategy:
-        # env vars → keychain → default age keys → 1Password (last resort).
-        # this ensures ``query list`` works even when 1Password is unavailable.
         import os
+
         try:
             cfg = load_config()
         except Exception as exc:
@@ -1318,7 +1299,6 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
             cfg = {}
         ids, env_pass = _resolve_decrypt_credentials(cfg)
 
-        # build the command line. identities (if any) go before the path.
         cmd = ["age", "--decrypt", "-o", "-"]
         if ids:
             for entry in ids.split(os.pathsep):
@@ -1334,10 +1314,8 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
-            # just in case ensure_tool lied
             raise RuntimeError("age not found for decryption")
 
-        # optionally supply a passphrase on stdin
         if env_pass is not None:
             try:
                 proc.stdin.write(env_pass.encode() + b"\n")
@@ -1345,46 +1323,38 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
                 pass
         proc.stdin.close()
 
-        # wait for the subprocess to finish and capture all output so we can
-        # report any errors.  this avoids having a half-read pipe confuse
-        # tarfile (which previously resulted in ``empty file`` errors when
-        # decryption failed).
         out_bytes, err_bytes = proc.communicate()
         rc = proc.returncode
         if rc != 0:
             err = err_bytes.decode(errors="ignore").strip()
-            # provide a more user-friendly hint when failure is due to missing
-            # credentials rather than generic corruption
             if "identities are required" in err or "not passphrase-encrypted" in err:
                 err += ("; ensure you have an age identity available (e.g. run `1p-exporter init` "
                         "to store one in 1Password, or use --age-identity/--age-passphrase)")
             raise RuntimeError(f"age decryption failed: {err or rc}")
         if not out_bytes:
-            # nothing to parse
             raise RuntimeError(
                 f"age decryption produced no output (rc=0, stderr={err_bytes!r})"
             )
 
-        # now parse the decrypted tar data from memory
         import io
         try:
             with io.BytesIO(out_bytes) as bio:
                 with tarfile.open(fileobj=bio, mode="r:*") as tf:
-                    _scan_tarfile(tf)
+                    yield from _items_from_tarfile(tf)
         except Exception as e:
             raise RuntimeError(f"failed to read archive {p}: {e}")
-        return matches
+        return
 
-    # otherwise treat path as a directory tree or a plain tar file
+    # plain tar archive
     if p.is_file() and (p.suffix in (".tar", ".tgz", ".gz") or p.name.endswith(".tar.gz")):
         try:
             with tarfile.open(p, "r:*") as tf:
-                _scan_tarfile(tf)
+                yield from _items_from_tarfile(tf)
         except Exception as e:
             raise RuntimeError(f"failed to read archive {p}: {e}")
-        return matches
+        return
 
-    # otherwise treat path as a directory tree
+    # directory tree
     for f in p.rglob("*.json"):
         if f.name == "manifest.json":
             continue
@@ -1393,11 +1363,54 @@ def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
         except Exception:
             continue
         if isinstance(data, list):
-            for item in data:
-                title = item.get("title")
-                if title and regex.search(title):
-                    matches.append(title)
-    return matches
+            yield from data
+
+
+def query_list_titles(path: Union[str, Path], pattern: str) -> List[str]:
+    """Return item titles matching *pattern* in exported JSON under *path*.
+
+    *path* may be a directory containing per-vault JSON exports (as produced by
+    :func:`run_backup`) or a tar archive created by a backup.  The function
+    searches for ``*.json`` files (skipping ``manifest.json``) and extracts a
+    list of titles from any list-valued JSON, filtering with the provided
+    regular expression.  A ``re.compile`` error will propagate to the caller.
+    """
+    import re
+
+    regex = re.compile(pattern)
+    return [
+        item["title"]
+        for item in _iter_exported_items(path)
+        if item.get("title") and regex.search(item["title"])
+    ]
+
+
+def query_get_item(path: Union[str, Path], item_ref: str) -> dict:
+    """Return the full item dict for a single item identified by *item_ref*.
+
+    *item_ref* is matched first against each item's ``title`` (exact,
+    case-sensitive) and then against its ``id``.  If no items match a
+    :class:`KeyError` is raised.  If more than one item shares the same title
+    a :class:`ValueError` is raised listing the conflicting entries; use the
+    item id to disambiguate.
+
+    *path* accepts the same formats as :func:`query_list_titles`: a directory
+    of per-vault JSON exports, a plain tar/tar.gz archive, or an
+    age-encrypted archive.
+    """
+    found = [
+        item for item in _iter_exported_items(path)
+        if item.get("title") == item_ref or item.get("id") == item_ref
+    ]
+    if not found:
+        raise KeyError(f"no item found matching {item_ref!r}")
+    if len(found) > 1:
+        labels = [m.get("title", m.get("id", "?")) for m in found]
+        raise ValueError(
+            f"multiple items match {item_ref!r}: {labels}; "
+            "use the item id to disambiguate"
+        )
+    return found[0]
 
 
 def verify_manifest(manifest_path: str) -> bool:

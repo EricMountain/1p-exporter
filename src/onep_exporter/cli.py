@@ -99,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     ql.add_argument("--age-passphrase", dest="age_passphrase",
                     help="passphrase to use when decrypting age archives; sets BACKUP_PASSPHRASE environment variable")
 
+    qg = qsub.add_parser("get", help="Retrieve the full contents of a single item")
+    qg.add_argument("item", help="item title (exact, case-sensitive) or item id to retrieve")
+    qg.add_argument("--dir", "-d", default=".",
+                    help="path to directory containing exported JSON (default: current directory)")
+    qg.add_argument("--format", choices=["json", "md"], default="json",
+                    dest="output_format",
+                    help="output format: json (default) or md (markdown)")
+    qg.add_argument("--field", metavar="FIELD",
+                    help="print only the value of the named field instead of the full item")
+    qg.add_argument("--age-identity", action="append", dest="age_identities",
+                    help="path to an age identity file to use for decrypting archives; can be repeated.")
+    qg.add_argument("--age-passphrase", dest="age_passphrase",
+                    help="passphrase to use when decrypting age archives; sets BACKUP_PASSPHRASE environment variable")
+
     return p
 
 
@@ -220,6 +234,41 @@ def main(argv=None):
             for t in matches:
                 print(t)
             # exit code 0 even if no matches; you can pipe into ``wc -l`` etc
+            sys.exit(0)
+        elif args.query_cmd == "get":
+            from .exporter import query_get_item
+            from .templates import item_to_md
+
+            if hasattr(args, "age_passphrase") and args.age_passphrase is not None:
+                os.environ["BACKUP_PASSPHRASE"] = args.age_passphrase
+            if hasattr(args, "age_identities") and args.age_identities:
+                os.environ["AGE_IDENTITIES"] = os.pathsep.join(args.age_identities)
+
+            try:
+                item = query_get_item(args.dir, args.item)
+            except (KeyError, ValueError) as e:
+                print(f"error: {e}")
+                sys.exit(1)
+            except Exception as e:
+                print(f"error: {e}")
+                sys.exit(1)
+
+            if args.field:
+                fields = item.get("fields") or []
+                value = None
+                for f in fields:
+                    if f.get("name") == args.field or f.get("label") == args.field:
+                        value = f.get("value")
+                        break
+                if value is None:
+                    print(f"error: field {args.field!r} not found in item")
+                    sys.exit(1)
+                print(value)
+            elif args.output_format == "md":
+                print(item_to_md(item))
+            else:
+                import json
+                print(json.dumps(item, indent=2))
             sys.exit(0)
         else:
             q.print_help()
