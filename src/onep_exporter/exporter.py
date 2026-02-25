@@ -1,7 +1,7 @@
 import json
 import tarfile
 import tempfile
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -355,7 +355,7 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
     # exist or the subprocess will fail with "no such file or directory".
     output_base.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     # when encrypting we don't want persistent plaintext files left behind,
     # so create a temporary work directory that will be removed after the
