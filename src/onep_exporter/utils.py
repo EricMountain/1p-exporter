@@ -102,3 +102,31 @@ def write_json(path: Path, obj, *, indent: int = 2):
 
 def ensure_tool(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+AGE_MIN_VERSION = (1, 1, 0)
+
+
+def check_age_version() -> None:
+    """Raise RuntimeError if age is missing or older than 1.1.0.
+
+    age >= 1.1.0 is required for ``-i -`` (reading the identity from stdin),
+    which lets us avoid ever writing the private key to disk.
+    """
+    if not ensure_tool("age"):
+        raise RuntimeError("age not found; install it with: brew install age")
+    try:
+        _, out, _ = run_cmd(["age", "--version"], check=False)
+    except Exception as e:
+        raise RuntimeError(f"could not determine age version: {e}") from e
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
+    if not m:
+        raise RuntimeError(f"could not parse age version from: {out!r}")
+    found = tuple(int(x) for x in m.groups())
+    if found < AGE_MIN_VERSION:
+        req = ".".join(str(x) for x in AGE_MIN_VERSION)
+        raise RuntimeError(
+            f"age {'.'.join(str(x) for x in found)} is too old; "
+            f">= {req} is required for '-i -' (stdin identity) support. "
+            f"Upgrade with: brew upgrade age"
+        )

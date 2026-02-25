@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
-from .utils import run_cmd, write_json, sha256_file, ensure_tool, CommandError
+from .utils import run_cmd, write_json, sha256_file, ensure_tool, CommandError, check_age_version
 from .templates import item_to_md, vault_to_md
 
 
@@ -612,8 +612,16 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
 def _resolve_decrypt_credentials(cfg: dict, *, verbose: bool = True) -> tuple[Optional[str], Optional[str]]:
     """Resolve credentials for age decryption, preferring **local** stores.
 
-    Returns ``(identity_path_or_none, passphrase_or_none)``.  The caller should
-    use whichever value is non-None to build the ``age --decrypt`` command.
+    Returns ``(identity_or_none, passphrase_or_none)``.
+
+    ``identity_or_none`` is one of:
+
+    - A filesystem path string (e.g. ``~/.config/age/keys.txt`` or a
+      colon-separated list from ``AGE_IDENTITIES``)
+    - A ``("stdin", private_key_str)`` tuple — the caller must pass ``-i -``
+      to ``age`` and write the key to the process stdin.  The key is **never
+      written to disk**.
+    - ``None``
 
     Resolution order (stops at first hit):
 
@@ -633,7 +641,6 @@ def _resolve_decrypt_credentials(cfg: dict, *, verbose: bool = True) -> tuple[Op
     """
     import os
     import sys
-    import tempfile
 
     age_cfg = cfg.get("age", {})
     kc_service = age_cfg.get("keychain_service", "1p-exporter")
@@ -668,12 +675,8 @@ def _resolve_decrypt_credentials(cfg: dict, *, verbose: bool = True) -> tuple[Op
         priv = None
         _log(f"  ✗ {kc_key_desc}: {exc}")
     if priv:
-        tf = tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".txt")
-        tf.write(priv)
-        tf.flush()
-        tf.close()
-        _log(f"  ✓ {kc_key_desc} → wrote identity to {tf.name}")
-        return (tf.name, None)
+        _log(f"  ✓ {kc_key_desc} → will stream identity via stdin (no temp file)")
+        return (("stdin", priv), None)
     if priv is None:
         _log(f"  ✗ {kc_key_desc}: not found")
 
@@ -708,13 +711,8 @@ def _resolve_decrypt_credentials(cfg: dict, *, verbose: bool = True) -> tuple[Op
             exporter = OpExporter()
             priv = exporter.get_item_field_value(item_ref, "age_private_key")
             if priv:
-                tf = tempfile.NamedTemporaryFile(
-                    delete=False, mode="w", suffix=".txt")
-                tf.write(priv)
-                tf.flush()
-                tf.close()
-                _log(f"  ✓ 1Password age_private_key → wrote identity to {tf.name}")
-                return (tf.name, None)
+                _log(f"  ✓ 1Password age_private_key → will stream identity via stdin (no temp file)")
+                return (("stdin", priv), None)
             else:
                 _log(f"  ✗ 1Password item {item_ref!r} field 'age_private_key': empty/missing")
         except Exception as exc:
@@ -1286,8 +1284,7 @@ def _iter_exported_items(path: Union[str, Path]):
 
     # age-wrapped archive: decrypt first, then parse the embedded tar stream.
     if p.is_file() and (p.suffix == ".age" or p.name.endswith(".tar.age") or p.name.endswith(".tar.gz.age")):
-        if not ensure_tool("age"):
-            raise RuntimeError("age not found for decryption")
+        check_age_version()  # enforces >= 1.1.0 for -i - support
         import subprocess
         import os
 
@@ -1300,7 +1297,12 @@ def _iter_exported_items(path: Union[str, Path]):
         ids, env_pass = _resolve_decrypt_credentials(cfg)
 
         cmd = ["age", "--decrypt", "-o", "-"]
-        if ids:
+        identity_bytes: Optional[bytes] = None
+        if isinstance(ids, tuple) and ids[0] == "stdin":
+            # private key is in memory — feed via stdin using -i -
+            cmd.extend(["-i", "-"])
+            identity_bytes = ids[1].encode()
+        elif ids:
             for entry in ids.split(os.pathsep):
                 if entry:
                     cmd.extend(["-i", entry])
@@ -1316,7 +1318,9 @@ def _iter_exported_items(path: Union[str, Path]):
         except FileNotFoundError:
             raise RuntimeError("age not found for decryption")
 
-        if env_pass is not None:
+        if identity_bytes is not None:
+            proc.stdin.write(identity_bytes)
+        elif env_pass is not None:
             try:
                 proc.stdin.write(env_pass.encode() + b"\n")
             except Exception:
