@@ -104,6 +104,9 @@ def test_query_list_auto_identity(monkeypatch, tmp_path):
     # configure load_config to return an age config pointing at some item
     cfg = {"age": {"pass_item": "dummy"}}
     monkeypatch.setattr("onep_exporter.exporter.load_config", lambda: cfg)
+    # stub keychain to return nothing so the code falls through to 1Password
+    monkeypatch.setattr(
+        "onep_exporter.exporter._get_passphrase_from_keychain", lambda service, username: None)
     # stub the exporter method to return our private key when requested
     def fake_get(self, item_ref, field_name=None):
         if field_name == "age_private_key":
