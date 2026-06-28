@@ -13,7 +13,7 @@
         "recipients": "",
         "use_yubikey": false,
         "keychain_service": "onep-exporter",
-        "keychain_username": "backup",
+        "keychain_username": "age_private_key",
         "onepassword_vault": null
     }
 }

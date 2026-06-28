@@ -88,6 +88,7 @@ def resolve_decrypt_credentials(
 
     age_cfg = cfg.get("age", {})
     kc_service = age_cfg.get("keychain_service", "onep-exporter")
+    kc_username = age_cfg.get("keychain_username", "age_private_key")
 
     def _log(msg: str) -> None:
         if verbose:
@@ -109,10 +110,10 @@ def resolve_decrypt_credentials(
         return (ids, None)
     _log("  ✗ AGE_IDENTITIES env var not set")
 
-    # 2. keychain: private key (stored under account "age_private_key")
-    kc_key_desc = f"keychain service={kc_service!r} account='age_private_key'"
+    # 2. keychain: private key (stored under configured account, default "age_private_key")
+    kc_key_desc = f"keychain service={kc_service!r} account={kc_username!r}"
     try:
-        priv = get_passphrase_from_keychain(kc_service, "age_private_key")
+        priv = get_passphrase_from_keychain(kc_service, kc_username)
     except Exception as exc:
         priv = None
         _log(f"  ✗ {kc_key_desc}: {exc}")
@@ -173,7 +174,7 @@ def sync_age_credentials_to_keychain(
     *,
     age_pass_item: Optional[str],
     age_keychain_service: str = "onep-exporter",
-    age_keychain_username: str = "backup",
+    age_keychain_username: str = "age_private_key",
 ) -> None:
     """Ensure age private key is available in local keychain.
 

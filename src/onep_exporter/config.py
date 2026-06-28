@@ -112,7 +112,7 @@ def configure_interactive() -> dict:
     age_cfg = cfg.get("age", {})
     age_pass_item = None
     age_keychain_service = age_cfg.get("keychain_service", "onep-exporter")
-    age_keychain_username = age_cfg.get("keychain_username", "backup")
+    age_keychain_username = age_cfg.get("keychain_username", "age_private_key")
     age_recipients = age_cfg.get("recipients", "")
     age_use_yubikey = age_cfg.get("use_yubikey", False)
     op_vault = None

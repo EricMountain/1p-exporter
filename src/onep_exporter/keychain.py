@@ -177,7 +177,7 @@ def sync_keychain() -> bool:
         return False
 
     kc_service = age_cfg.get("keychain_service", "onep-exporter")
-    kc_username = age_cfg.get("keychain_username", "backup")
+    kc_username = age_cfg.get("keychain_username", "age_private_key")
     pass_field = age_cfg.get("pass_field", "passphrase")
 
     exporter = OpExporter()
@@ -192,10 +192,10 @@ def sync_keychain() -> bool:
         priv = None
     if priv:
         try:
-            store_passphrase_in_keychain(kc_service, "age_private_key", priv)
+            store_passphrase_in_keychain(kc_service, kc_username, priv)
             print(
                 f"  ✓ stored in keychain "
-                f"(service={kc_service!r} account='age_private_key')"
+                f"(service={kc_service!r} account={kc_username!r})"
             )
             synced += 1
         except Exception as e:
