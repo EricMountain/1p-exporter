@@ -150,6 +150,28 @@ def item_field_value(item: dict, field_name: str) -> Optional[str]:
     return None
 
 
+def is_probably_text(data: bytes) -> bool:
+    """Heuristic: does *data* look like printable/displayable text?
+
+    Used to decide whether to preview attachment content as plain text or
+    fall back to a base64 rendering. Binary data (containing NUL bytes,
+    invalid UTF-8, or a high proportion of non-printable characters) is
+    treated as not printable.
+    """
+    if not data:
+        return True
+    if b"\x00" in data:
+        return False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if not text:
+        return True
+    printable = sum(1 for c in text if c.isprintable() or c in "\n\r\t")
+    return printable / len(text) > 0.95
+
+
 def verify_manifest(manifest_path: str) -> bool:
     """Verify that all files listed in a manifest exist and match their checksums."""
     p = Path(manifest_path)

@@ -5,6 +5,7 @@ import pytest
 
 from onep_exporter.cli import main
 from onep_exporter.exporter import query_list_titles
+from onep_exporter.query import read_attachment_bytes
 
 
 def test_query_list_titles_dir(tmp_path):
@@ -416,6 +417,88 @@ def test_query_get_cli_field_missing(tmp_path, capsys):
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "error" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# read_attachment_bytes
+# ---------------------------------------------------------------------------
+
+
+def test_read_attachment_bytes_dir(tmp_path):
+    attachments = tmp_path / "attachments"
+    attachments.mkdir()
+    (attachments / "a1-file.txt").write_bytes(b"hello attachment")
+
+    data = read_attachment_bytes(tmp_path, "a1", "file.txt")
+    assert data == b"hello attachment"
+
+
+def test_read_attachment_bytes_dir_nested(tmp_path):
+    root = tmp_path / "20260101T000000Z"
+    attachments = root / "attachments"
+    attachments.mkdir(parents=True)
+    (attachments / "a1-file.txt").write_bytes(b"nested content")
+
+    data = read_attachment_bytes(tmp_path, "a1", "file.txt")
+    assert data == b"nested content"
+
+
+def test_read_attachment_bytes_dir_not_found(tmp_path):
+    assert read_attachment_bytes(tmp_path, "missing", "nope.txt") is None
+
+
+def test_read_attachment_bytes_tarball(tmp_path):
+    import tarfile
+
+    root = tmp_path / "out"
+    attachments = root / "attachments"
+    attachments.mkdir(parents=True)
+    (attachments / "a1-file.txt").write_bytes(b"tarred content")
+
+    archive = tmp_path / "archive.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(root, arcname="20260101T000000Z")
+
+    data = read_attachment_bytes(archive, "a1", "file.txt")
+    assert data == b"tarred content"
+    assert read_attachment_bytes(archive, "missing", "nope.txt") is None
+
+
+def test_read_attachment_bytes_age(tmp_path):
+    import shutil
+    import subprocess
+    import tarfile
+
+    if shutil.which("age") is None:
+        pytest.skip("age not installed")
+
+    root = tmp_path / "out"
+    attachments = root / "attachments"
+    attachments.mkdir(parents=True)
+    (attachments / "a1-file.bin").write_bytes(b"\x00\x01secret binary content")
+
+    archive = tmp_path / "archive.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(root, arcname="20260101T000000Z")
+
+    keyfile = tmp_path / "agekey.txt"
+    proc = subprocess.run(["age-keygen", "-o", str(keyfile)], capture_output=True, text=True, check=True)
+    pubkey = None
+    for line in proc.stderr.splitlines():
+        if line.startswith("Public key:"):
+            pubkey = line.split(":", 1)[1].strip()
+            break
+    assert pubkey
+    enc = tmp_path / "archive.tar.gz.age"
+    subprocess.run(["age", "-r", pubkey, "-o", str(enc), str(archive)], check=True)
+
+    import os
+    os.environ["AGE_IDENTITIES"] = str(keyfile)
+    try:
+        data = read_attachment_bytes(enc, "a1", "file.bin")
+    finally:
+        os.environ.pop("AGE_IDENTITIES", None)
+    assert data == b"\x00\x01secret binary content"
 
 
 def test_query_get_cli_not_found(tmp_path, capsys):

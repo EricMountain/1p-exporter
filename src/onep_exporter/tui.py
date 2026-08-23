@@ -18,8 +18,9 @@ from textual.strip import Strip
 from textual.timer import Timer
 from rich.text import Text
 from .config import load_config, save_config
-from .query import _iter_exported_items
+from .query import _iter_exported_items, read_attachment_bytes
 from .templates import _totp_now
+from .utils import is_probably_text
 
 _CATEGORY_ICONS: dict[str, str] = {
     "LOGIN": "\U0001f511",           # 🔑
@@ -417,6 +418,108 @@ class TotpLabel(Static):
         self.app.notify(f'Copied "{self._field_name}" to clipboard', timeout=2)
 
 
+_MAX_ATTACHMENT_PREVIEW = 8000  # characters shown before truncating
+
+
+class AttachmentContent(Static):
+    """Renders previewed attachment content (text or base64), indented with
+    a vertical bar on the left to match the Notes block styling."""
+
+    DEFAULT_CSS = """
+    AttachmentContent {
+        color: $accent;
+        padding: 0 0 0 1;
+    }
+    AttachmentContent:hover {
+        background: $boost;
+    }
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        lines = text.splitlines() or [""]
+        txt = Text()
+        for i, line in enumerate(lines):
+            if i:
+                txt.append("\n")
+            txt.append(Text("│ ", style="dim"))
+            txt.append(Text(line))
+        super().__init__(txt)
+
+    def on_click(self) -> None:
+        self.app.copy_to_clipboard(self._text)
+        self.app.notify("Copied attachment content to clipboard", timeout=2)
+
+
+class AttachmentLabel(Static):
+    """Shows a file attachment's name/size; click to fetch it from the
+    archive and preview its content (plain text if printable, otherwise
+    base64)."""
+
+    DEFAULT_CSS = """
+    AttachmentLabel {
+        color: $text;
+    }
+    AttachmentLabel:hover {
+        background: $boost;
+    }
+    """
+
+    def __init__(self, archive_path: Path, file_id: str, name: str, size: Optional[int] = None) -> None:
+        self._archive_path = archive_path
+        self._file_id = file_id
+        self._file_name = name
+        self._file_size = size
+        self._loading = False
+        self._loaded = False
+        super().__init__(self._label_text())
+
+    def _label_text(self, hint: str = "click to preview") -> Text:
+        size_str = f" ({self._file_size} bytes)" if self._file_size else ""
+        txt = Text.from_markup(f"- \U0001f4ce {_style_label(self._file_name)}{size_str} ")
+        txt.append(Text(f"[{hint}]", style="dim"))
+        return txt
+
+    def on_click(self) -> None:
+        if self._loading or self._loaded:
+            return
+        self._loading = True
+        self.update(self._label_text("loading…"))
+        self.run_worker(self._fetch, thread=True, exclusive=True)
+
+    def _fetch(self) -> None:
+        try:
+            data = read_attachment_bytes(self._archive_path, self._file_id, self._file_name)
+        except Exception as e:
+            self.app.call_from_thread(self._on_error, str(e))
+            return
+        if data is None:
+            self.app.call_from_thread(self._on_error, "attachment not found in archive")
+            return
+        self.app.call_from_thread(self._on_loaded, data)
+
+    def _on_error(self, message: str) -> None:
+        self._loading = False
+        self.update(self._label_text("error"))
+        self.app.notify(f'Failed to load "{self._file_name}": {message}', severity="error", timeout=4)
+
+    def _on_loaded(self, data: bytes) -> None:
+        self._loading = False
+        self._loaded = True
+        if is_probably_text(data):
+            text = data.decode("utf-8", errors="replace")
+            hint = "text"
+        else:
+            import base64
+            text = base64.b64encode(data).decode("ascii")
+            hint = "base64"
+        if len(text) > _MAX_ATTACHMENT_PREVIEW:
+            text = text[:_MAX_ATTACHMENT_PREVIEW] + "\n… (truncated)"
+        self.update(self._label_text(hint))
+        if self.parent is not None:
+            self.parent.mount(AttachmentContent(text), after=self)
+
+
 class ItemDetail(Vertical):
     """Panel that renders a single item with interactive fields."""
 
@@ -494,7 +597,7 @@ def _style_label(s: str) -> str:
 
 
 
-def _build_item_widgets(item: dict) -> List:
+def _build_item_widgets(item: dict, archive_path: Optional[Path] = None) -> List:
     """Build a list of Static / SecretLabel / TotpLabel widgets that render *item*."""
     widgets: List = []
     pending: List[Text] = []
@@ -598,6 +701,18 @@ def _build_item_widgets(item: dict) -> List:
         flush()
         widgets.append(NotesLabel("Notes", note))
         widgets.append(Notes(note))
+
+    files = item.get("files") or item.get("documents") or []
+    if files and archive_path is not None:
+        flush()
+        pending.append(Text.from_markup(_style_label('Attachments') + ":"))
+        flush()
+        for fmeta in files:
+            fid = fmeta.get("id") or fmeta.get("file_id")
+            name = fmeta.get("name") or fmeta.get("filename")
+            size = fmeta.get("size") or fmeta.get("content_length")
+            if fid and name:
+                widgets.append(AttachmentLabel(archive_path, fid, name, size))
 
     flush()
     return widgets
@@ -771,7 +886,7 @@ class BrowseApp(App):
             item = self._filtered_items[idx]
             detail = self.query_one("#detail", ItemDetail)
             detail.query("*").remove()
-            widgets = _build_item_widgets(item)
+            widgets = _build_item_widgets(item, self._archive_path)
             if widgets:
                 detail.mount(*widgets)
 

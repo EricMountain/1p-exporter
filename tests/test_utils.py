@@ -1,5 +1,5 @@
 from pathlib import Path
-from onep_exporter.utils import sha256_file, CommandError
+from onep_exporter.utils import sha256_file, CommandError, is_probably_text
 
 
 def test_sha256_file(tmp_path):
@@ -35,3 +35,24 @@ def test_commanderror_redacts_age_secret_and_private_block():
     assert "<redacted private key>" in s2 or "…" in s2
     # no doubled quotes introduced
     assert '""' not in s2
+
+
+def test_is_probably_text_plain_text():
+    assert is_probably_text(b"hello world\nsecond line\n")
+
+
+def test_is_probably_text_empty():
+    assert is_probably_text(b"")
+
+
+def test_is_probably_text_binary_with_nul():
+    assert not is_probably_text(b"\x00\x01\x02binary")
+
+
+def test_is_probably_text_invalid_utf8():
+    assert not is_probably_text(b"\xff\xfe\x00\x10not utf8")
+
+
+def test_is_probably_text_png_header():
+    # PNG magic bytes followed by mostly non-printable data
+    assert not is_probably_text(b"\x89PNG\r\n\x1a\n" + bytes(range(1, 20)))
