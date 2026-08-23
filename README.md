@@ -2,9 +2,9 @@
 
 ## Overview
 
-1p-exporter exports all your 1Password vaults/items to local files, packages them into a timestamped archive, and optionally encrypts that archive client‑side. It produces machine‑readable JSON and human‑readable Markdown, stores a `manifest.json` with checksums, and provides helpers for safe passphrase storage.
+onep-exporter exports all your 1Password vaults/items to local files, packages them into a timestamped archive, and optionally encrypts that archive client‑side. It produces machine‑readable JSON and human‑readable Markdown, stores a `manifest.json` with checksums, and provides helpers for safe passphrase storage.
 
-Note: the Python import package name remains `onep_exporter` (use `import onep_exporter`); the user-facing project/CLI name is `1p-exporter`.
+Note: the Python import package name remains `onep_exporter` (use `import onep_exporter`); the user-facing project/CLI name is `onep-exporter`.
 
 ## Features
 
@@ -12,7 +12,7 @@ Note: the Python import package name remains `onep_exporter` (use `import onep_e
 - Per‑vault `JSON` and `Markdown` exports
 - Attachment download (best‑effort) and `manifest.json` with SHA256 checksums
 - Optional client‑side encryption with `age` (recommended)
-- Interactive `init` flow and persistent configuration (`~/.config/1p-exporter/config.json`)
+- Interactive `init` flow and persistent configuration (`~/.config/onep-exporter/config.json`)
 - Helpers to store/retrieve passphrases in 1Password or macOS Keychain (Touch ID supported)
 
 ## Installation
@@ -25,7 +25,7 @@ Note: the Python import package name remains `onep_exporter` (use `import onep_e
      brew install age
      ```
 
-2. Install 1p-exporter
+2. Install onep-exporter
 
    - Install via `pipx` from GitHub (recommended):
 
@@ -88,14 +88,14 @@ pipx uninstall onep-exporter
 
 ### Notes & troubleshooting
 
-- Your saved configuration and any stored passphrases are preserved across upgrades (the config live under `~/.config/1p-exporter/`).  
+- Your saved configuration and any stored passphrases are preserved across upgrades (the config live under `~/.config/onep-exporter/`).  
 - If you need help connecting `op` (1Password CLI), see the [1Password CLI docs](https://developer.1password.com/docs/cli/).
 
 ## Encryption
 
 - `age` (recommended): supports passphrase recipients and public‑key recipients.
   - `--age-pass-source` may be `env`, `prompt`, `1password`, or `keychain`.
-  - If the passphrase is present in multiple stores (1Password, Keychain, or the `BACKUP_PASSPHRASE` env), 1p-exporter will verify they are identical and will abort if they differ.
+  - If the passphrase is present in multiple stores (1Password, Keychain, or the `BACKUP_PASSPHRASE` env), onep-exporter will verify they are identical and will abort if they differ.
   - Use `--sync-passphrase-from-1password` to treat the value in 1Password as authoritative and copy it to other configured stores (keychain/ENV) before encrypting.
   - Use `--age-recipients` to include public recipients (e.g. YubiKey‑backed identities).
   *Note:* age does **not** allow combining an explicit recipient list with the
@@ -133,11 +133,11 @@ Use the `init` subcommand to build a config.
 
 ## Commands (summary)
 
-- `1p-exporter init` — interactive setup and optional passphrase storage
-- `1p-exporter backup [--encrypt age|none]` — run export (CLI overrides config)
-- `1p-exporter browse` - run a TUI to browse archives.
-- `1p-exporter verify <manifest.json>` — verify manifest integrity
-- `1p-exporter query list <regexp> [--dir DIR] [--age-identity PATH] [--age-passphrase PASS]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory).  When the target is an encrypted archive the command will attempt to decrypt it using the `age` tool.  Decryption credentials may be provided in several ways:
+- `onep-exporter init` — interactive setup and optional passphrase storage
+- `onep-exporter backup [--encrypt age|none]` — run export (CLI overrides config)
+- `onep-exporter browse` - run a TUI to browse archives.
+- `onep-exporter verify <manifest.json>` — verify manifest integrity
+- `onep-exporter query list <regexp> [--dir DIR] [--age-identity PATH] [--age-passphrase PASS]` — inspect existing exports and print item titles that match the given regular expression (default directory is current working directory).  When the target is an encrypted archive the command will attempt to decrypt it using the `age` tool.  Decryption credentials may be provided in several ways:
   - `--age-identity PATH` (repeatable) or `AGE_IDENTITIES` env var – path(s) to age identity file(s).
   - `--age-passphrase PASS` or `BACKUP_PASSPHRASE` env var – symmetric passphrase (user will need to supply it manually since age does not support non‑interactive passphrase input).
   - **automatic lookup** – if no credentials are supplied the tool will consult your saved configuration and, if you previously stored an age private key/passphrase in 1Password or the macOS keychain, it will fetch them and use them transparently.
@@ -146,7 +146,7 @@ Use the `init` subcommand to build a config.
 
 ```bash
 # find every exported item whose title contains "github"
-1p-exporter query list github
+onep-exporter query list github
 ```
 
 ## Development & tests
