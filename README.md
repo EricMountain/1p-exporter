@@ -43,6 +43,7 @@ Note: the Python import package name remains `onep_exporter` (use `import onep_e
 
 - Ensure the 1Password app has [1Password CLI integration enabled](https://developer.1password.com/docs/cli/app-integration/#set-up-the-app-integration)
   - Settings → Developer → Integrate with 1Password CLI
+  - You may also need to export `OP_BIOMETRIC_UNLOCK_ENABLED=true` if `op signin -f` reports "No accounts configured for use with 1Password CLI"
 
 - Run interactive setup
 
