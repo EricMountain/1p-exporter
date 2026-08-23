@@ -137,25 +137,33 @@ class OpExporter:
         _, out, _ = self._op(["op", "item", "get", item_id, "--format=json"])
         return json.loads(out)
 
-    def download_document(self, doc_id: str, dest: Path) -> None:
-        # Try `op document get <id> --output <file>` (works for document/file objects)
+    def download_document(self, vault_id: str, item_id: str, file_id: str, dest: Path) -> None:
+        # File/document attachments are not standalone items, so `op document
+        # get <file-id>` fails with "isn't an item". They must instead be
+        # addressed via a secret reference of the form
+        # op://<vault-id>/<item-id>/<file-id>, resolved with `op read`.
+        ref = f"op://{vault_id}/{item_id}/{file_id}"
         try:
-            self._op(["op", "document", "get", doc_id, "--output", str(dest)])
+            self._op(["op", "read", "--out-file", str(dest), "--force", ref])
         except RuntimeError as e:
-            raise RuntimeError(f"failed to download document {doc_id}: {e}")
+            raise RuntimeError(f"failed to download document {file_id}: {e}")
 
-    def download_document_bytes(self, doc_id: str) -> bytes:
-        """Download a document and return its raw bytes.
+    def download_document_bytes(self, vault_id: str, item_id: str, file_id: str) -> bytes:
+        """Download a document/file attachment and return its raw bytes.
 
         This is used when we're encrypting and do not want to write the
-        attachment to disk.  We run `op document get <id>` without the
-        --output flag and capture stdout.
+        attachment to disk.  We resolve the file via its secret reference
+        (op://<vault-id>/<item-id>/<file-id>) with `op read` and capture
+        stdout as raw bytes (``-n`` suppresses the trailing newline `op`
+        would otherwise append, and ``text=False`` avoids a UTF-8 decode
+        round-trip that would corrupt binary content).
         """
+        ref = f"op://{vault_id}/{item_id}/{file_id}"
         try:
-            rc, out, err = self._op(["op", "document", "get", doc_id], capture_output=True)
+            rc, out, err = self._op(["op", "read", "-n", ref], capture_output=True, text=False)
         except RuntimeError as e:
-            raise RuntimeError(f"failed to download document {doc_id}: {e}")
-        return out.encode("utf-8") if isinstance(out, str) else out
+            raise RuntimeError(f"failed to download document {file_id}: {e}")
+        return out if isinstance(out, bytes) else out.encode("utf-8")
 
     def get_item_field_value(self, item_ref: str, field_name: Optional[str] = None) -> Optional[str]:
         """Return a field value from a 1Password item JSON.
@@ -491,7 +499,7 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                         if encrypt == "none":
                             dest = attachments_dir / f"{fid}-{name}"
                             try:
-                                exporter.download_document(fid, dest)
+                                exporter.download_document(vault_id, item_id, fid, dest)
                             except Exception as e:
                                 warnings.append(f"could not download attachment {name}: {e}")
                                 vault_errors += 1
@@ -504,7 +512,7 @@ def run_backup(*, output_base: Union[str, Path] = "backups", formats=("json", "m
                         else:
                             # fetch bytes directly and keep in memory
                             try:
-                                data = exporter.download_document_bytes(fid)
+                                data = exporter.download_document_bytes(vault_id, item_id, fid)
                             except Exception as e:
                                 warnings.append(f"could not download attachment {name}: {e}")
                                 vault_errors += 1

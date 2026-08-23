@@ -75,12 +75,20 @@ class CommandError(RuntimeError):
         return _redact_sensitive(super().__str__() or "")
 
 
-def run_cmd(cmd: list[str], capture_output: bool = True, check: bool = True, input: Optional[bytes] = None) -> Tuple[int, str, str]:
-    """Run subprocess command and return (rc, stdout, stderr)."""
+def run_cmd(cmd: list[str], capture_output: bool = True, check: bool = True, input: Optional[bytes] = None, text: bool = True) -> Tuple[int, "str | bytes", str]:
+    """Run subprocess command and return (rc, stdout, stderr).
+
+    When *text* is False, stdout is returned as raw ``bytes`` instead of being
+    decoded as UTF-8 — required for binary attachment content, which would
+    otherwise be corrupted (or raise ``UnicodeDecodeError``) on decode.
+    """
     proc = subprocess.run(cmd, capture_output=capture_output, input=input)
     rc = proc.returncode
-    out = proc.stdout.decode("utf-8") if proc.stdout else ""
-    err = proc.stderr.decode("utf-8") if proc.stderr else ""
+    err = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+    if text:
+        out = proc.stdout.decode("utf-8") if proc.stdout else ""
+    else:
+        out = proc.stdout or b""
     if check and rc != 0:
         raise CommandError(cmd=cmd, rc=rc, stderr=err)
     return rc, out, err

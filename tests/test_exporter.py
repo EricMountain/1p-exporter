@@ -13,7 +13,7 @@ def test_get_item_field_value(monkeypatch):
     sample_item = {"fields": [
         {"id": "f1", "type": "password", "name": "password", "value": "seekrit"}]}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "item", "get"]:
             return 0, json.dumps(sample_item), ""
         raise RuntimeError("unexpected command: %r" % (cmd,))
@@ -30,7 +30,7 @@ def test_get_item_field_value_heuristic_when_no_field_provided(monkeypatch):
     sample_item = {"fields": [
         {"id": "f1", "type": "text", "label": "passphrase", "value": "secret"}]}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "item", "get"]:
             return 0, json.dumps(sample_item), ""
         raise RuntimeError("unexpected command: %r" % (cmd,))
@@ -45,7 +45,7 @@ def test_get_item_field_value_explicit_missing_returns_none(monkeypatch):
     sample_item = {"fields": [
         {"id": "f1", "type": "text", "label": "passphrase", "value": "secret"}]}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "item", "get"]:
             return 0, json.dumps(sample_item), ""
         raise RuntimeError("unexpected command: %r" % (cmd,))
@@ -87,16 +87,16 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
     monkeypatch.setattr(shutil, "rmtree", lambda p: None)
 
     # our fake run_cmd should supply vault, item and attachment metadata
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "vault", "list"]:
             return 0, '[{"id": "v1", "name": "Vault"}]', ""
         if cmd[:3] == ["op", "item", "list"]:
             return 0, '[{"id":"i1"}]', ""
         if cmd[:3] == ["op", "item", "get"]:
             return 0, '{"id":"i1","fields":[],"files":[{"id":"a1","name":"file.txt"}]}', ""
-        if cmd[:3] == ["op", "document", "get"]:
+        if cmd[:2] == ["op", "read"]:
             # return dummy bytes for attachment
-            return 0, "contents", ""
+            return 0, (b"contents" if not text else "contents"), ""
         return 0, "", ""
     monkeypatch.setattr(exporter_module, "run_cmd", fake_run_cmd)
 
@@ -142,7 +142,7 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
             return False
 
     # stub run_cmd so that we have one vault/item and avoid executing real CLI
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "vault", "list"]:
             return 0, '[{"id": "v1", "name": "Vault"}]', ""
         if cmd[:3] == ["op", "item", "list"]:
@@ -182,7 +182,7 @@ def test_streaming_encrypt_path(monkeypatch, tmp_path):
 def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
     # ensure minimal export with markdown and no encryption; no files should be left behind
     monkeypatch.setattr(exporter_module, "ensure_tool", lambda name: True)
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         from pathlib import Path
         if cmd[:3] == ["op", "vault", "list"]:
             return 0, '[{"id": "v1", "name": "Vault"}]', ""
@@ -191,8 +191,8 @@ def test_markdown_written_when_not_encrypted(monkeypatch, tmp_path):
         if cmd[:3] == ["op", "item", "get"]:
             # include a dummy attachment entry
             return 0, '{"id":"i1","fields":[],"files":[{"id":"a1","name":"file.txt"}]}', ""
-        if cmd[:3] == ["op", "document", "get"]:
-            outpath = cmd[-1]
+        if cmd[:2] == ["op", "read"] and "--out-file" in cmd:
+            outpath = cmd[cmd.index("--out-file") + 1]
             try:
                 Path(outpath).parent.mkdir(parents=True, exist_ok=True)
                 with open(outpath, "wb") as f:
@@ -226,7 +226,7 @@ def test_get_passphrase_from_keychain_keyring(monkeypatch):
 
 def test_get_passphrase_from_keychain_security_fallback(monkeypatch):
     # simulate 'security' CLI via run_cmd fallback
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[0] == "security":
             return 0, "sec-pass\n", ""
         raise RuntimeError("unexpected")
@@ -260,7 +260,7 @@ def test_store_passphrase_skips_if_exists(monkeypatch):
                         lambda self, title, vault=None: {"id": "exists"})
     called = {"create": False}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "item", "create"]:
             called["create"] = True
             return 0, "{}", ""
@@ -279,7 +279,7 @@ def test_store_passphrase_pipes_json_via_stdin(monkeypatch):
     and uses category 'Secure Note' with field type CONCEALED."""
     seen = {}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         seen["cmd"] = cmd
         seen["input"] = input
         return 0, '{"id": "new"}', ""
@@ -327,7 +327,7 @@ def test_upsert_item_field_adds_and_updates(monkeypatch):
     def fake_get_item(self, item_id):
         return original.copy()
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         seen["cmd"] = cmd
         seen["input"] = input
         # echo back the JSON we received as the updated item
@@ -358,7 +358,7 @@ def test_store_private_key_uses_concealed_field(monkeypatch):
     """Private keys are also stored as CONCEALED fields (same as passphrases)."""
     seen = {}
 
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         seen["input"] = input
         return 0, '{"id": "new"}', ""
 
@@ -390,7 +390,7 @@ def test_passphrase_mismatch_raises(monkeypatch, tmp_path):
         keychain_module, "get_passphrase_from_keychain", lambda s, u: "kc-different")
 
     # fake op vault list
-    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None: (
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None, text=True: (
         0, "[]", "") if cmd[:3] == ["op", "vault", "list"] else (0, "", ""))
 
     pytest.skip("passphrase support removed; mismatch check not applicable")
@@ -479,7 +479,7 @@ def test_age_passphrase_not_found_reports_item_and_field(monkeypatch, tmp_path):
     # always fail to return a passphrase
     monkeypatch.setattr(exporter_module.OpExporter,
                         "get_item_field_value", lambda self, item, field=None: None)
-    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None: (
+    monkeypatch.setattr(exporter_module, "run_cmd", lambda cmd, capture_output=True, check=True, input=None, text=True: (
         (0, "[]", "") if cmd[:3] == ["op", "vault", "list"] else (0, "", "")))
 
     pytest.skip("passphrase support removed; no passphrase extraction")
@@ -572,7 +572,7 @@ def test_sync_private_key_from_1password_to_keychain(monkeypatch, tmp_path):
         keychain_module, "store_passphrase_in_keychain", fake_store_kc)
 
     # fake run_cmd to allow vault listing (encryption is handled by Popen now)
-    def fake_run_cmd(cmd, capture_output=True, check=True, input=None):
+    def fake_run_cmd(cmd, capture_output=True, check=True, input=None, text=True):
         if cmd[:3] == ["op", "vault", "list"]:
             return 0, "[]", ""
         return 0, "", ""
